@@ -68,7 +68,7 @@ function M.resetUsageStats()  saveUsageStats({ convertLanguage = 0, clipboardMan
 function M.getConfig()        return loadConfig() end
 
 local function buildManagerHTML(config, usage)
-  return string.format([[
+  return string.format([==[
 <!doctype html>
 <html><head><meta charset="utf-8">
 <style>
@@ -192,7 +192,7 @@ function showStatus(msg, type) {
 
 window.addEventListener('load', loadCurrent);
 </script></body></html>
-]], hs.json.encode(config), hs.json.encode(usage))
+]==], hs.json.encode(config), hs.json.encode(usage))
 end
 
 local function computeSmartRect(w, h)
