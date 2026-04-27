@@ -1,0 +1,16 @@
+.DS_Store
+*.bak
+*.bak_*
+*.backup
+
+# Hammerspoon runtime data — generated locally per machine
+hotkeys.json
+hotkey_usage.json
+clipboard-recent.json
+clipboard-pinned.json
+clipboard-images/
+Spoons/
+
+# Editor
+.vscode/
+.idea/
