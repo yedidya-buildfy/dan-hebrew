@@ -13,6 +13,7 @@ local imageDir = storeDir .. "/clipboard-images"
 local maxRecent = 100
 local store = { pinned = {}, recent = {} }
 local watcher, panel, clickWatcher, keyWatcher = nil, nil, nil, nil
+local savedPanelFrame = nil  -- remembers panel size before image preview enlargement
 local fullyLoaded = false
 local pinnedHotkeys = {}  -- active hs.hotkey objects, keyed by pinned array index
 local saveRecentTimer = nil
@@ -108,6 +109,12 @@ local function fileExists(path)
   local f = io.open(path, "r")
   if f then f:close() return true end
   return false
+end
+
+-- JSON-encode a single scalar (string/number/bool) for embedding in a JS call.
+-- hs.json.encode requires a table, so we wrap and strip the brackets.
+local function jsonScalar(v)
+  return hs.json.encode({v}):sub(2, -2)
 end
 
 local function savePinned()
@@ -602,7 +609,7 @@ html,body{margin:0;padding:0;font-family:-apple-system,Helvetica,Arial;backgroun
 .detail-edit{width:100%;min-height:300px;background:#0a0a0a;color:#ddd;border:1px solid #333;border-radius:8px;padding:16px;font-family:'SF Mono',Menlo,Consolas,monospace;font-size:13px;line-height:1.6;resize:vertical;outline:none;box-sizing:border-box}
 .detail-edit:focus{border-color:#2563eb}
 .detail-image{display:flex;align-items:center;justify-content:center;height:100%}
-.detail-image img{max-width:95%;max-height:90vh;object-fit:contain;border-radius:8px;image-rendering:auto}
+.detail-image img{max-width:95%;max-height:90vh;object-fit:contain;border-radius:8px;image-rendering:high-quality;image-rendering:-webkit-optimize-contrast}
 .detail-actions{padding:12px 16px;display:flex;gap:8px;border-top:1px solid #333;flex-shrink:0;justify-content:flex-end}
 .detail-btn{border:none;color:#eee;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:500;display:flex;align-items:center;gap:6px;transition:background .15s}
 .detail-btn.primary{background:#2563eb}
@@ -814,7 +821,6 @@ function previewItem(col, idx){
   selCol=col;selIdx=idx;hasInteracted=true;renderSelection();
   const arr=(col==='recent'?filtered(recent):filtered(pinned));
   const it=arr[selIdx];
-  try{window.webkit.messageHandlers.clips.postMessage({action:'debug',msg:'previewItem col='+col+' idx='+idx+' itType='+(it&&it.type)+' title='+(it&&(it.title||'').slice(0,40))});}catch(e){}
   openDetail();
   if(it && it.type !== 'image'){startEdit();}
 }
@@ -835,7 +841,7 @@ function openDetail(){
     contentEl.innerHTML='<div class="detail-image"><img id="detailImg" src="" style="opacity:0"></div>';
     const fullList=(selCol==='recent'?recent:pinned);
     const actualIdx=fullList.indexOf(it);
-    try{window.webkit.messageHandlers.clips.postMessage({action:'debug',msg:'openDetail image col='+selCol+' idx='+selIdx+' actualIdx='+actualIdx+' hasImagePath='+!!it.imagePath+' type='+it.type});}catch(e){}
+    try{window.webkit.messageHandlers.clips.postMessage({action:'expandForImage'});}catch(e){}
     if(actualIdx>=0){
       try{window.webkit.messageHandlers.clips.postMessage({action:'loadFullImage',index:actualIdx,col:selCol});}catch(e){}
     }
@@ -896,15 +902,18 @@ function setFullImage(dataUrl){
   if(img&&dataUrl){img.src=dataUrl;img.style.opacity='1';}
 }
 
-// Apply edit without resetting selection / detail state
-function applyEdit(col, index, newContent, newTitle){
-  const list=(col==='pinned'?pinned:recent);
-  if(list[index]){
-    list[index].content=newContent;
-    list[index].title=newTitle;
-  }
+// Replace data, close detail/edit, return to main list with the edited item selected at top.
+function applyEditAndClose(newPinned, newRecent, col, newIdx){
+  pinned.length=0; pinned.push(...newPinned);
+  recent.length=0; recent.push(...newRecent);
+  editMode=false;
+  detailMode=false;
+  document.getElementById('detailOverlay').classList.remove('active');
+  try{window.webkit.messageHandlers.clips.postMessage({action:'disableTextEntry'});}catch(e){}
+  try{window.webkit.messageHandlers.clips.postMessage({action:'restorePanel'});}catch(e){}
+  selCol=col||'recent';
+  selIdx=newIdx||0;
   render();
-  if(detailMode){openDetail();}
 }
 
 function saveEdit(){
@@ -925,6 +934,7 @@ function saveEdit(){
 function closeDetail(){
   detailMode=false;
   document.getElementById('detailOverlay').classList.remove('active');
+  try{window.webkit.messageHandlers.clips.postMessage({action:'restorePanel'});}catch(e){}
 }
 
 function pasteFromDetail(){
@@ -1154,6 +1164,13 @@ local function closePanel()
     clickWatcher:stop()
     clickWatcher = nil
   end
+  if panel and savedPanelFrame then
+    pcall(function()
+      panel:topLeft({ x = savedPanelFrame.x, y = savedPanelFrame.y })
+      panel:size({ w = savedPanelFrame.w, h = savedPanelFrame.h })
+    end)
+    savedPanelFrame = nil
+  end
   if panel then
     panel:hide()
   end
@@ -1297,6 +1314,31 @@ local function handleWebMessage(msg)
     closePanel()
   elseif body.action == "debug" then
     print("[clipboard] DEBUG: " .. tostring(body.msg))
+  elseif body.action == "expandForImage" then
+    if panel then
+      pcall(function()
+        if not savedPanelFrame then
+          savedPanelFrame = panel:frame()
+        end
+        local screen = hs.mouse.getCurrentScreen() or hs.screen.mainScreen()
+        local sf = screen:fullFrame()
+        local margin = 0.05
+        local w = math.floor(sf.w * (1 - 2 * margin))
+        local h = math.floor(sf.h * (1 - 2 * margin))
+        local x = sf.x + math.floor(sf.w * margin)
+        local y = sf.y + math.floor(sf.h * margin)
+        panel:topLeft({ x = x, y = y })
+        panel:size({ w = w, h = h })
+      end)
+    end
+  elseif body.action == "restorePanel" then
+    if panel and savedPanelFrame then
+      pcall(function()
+        panel:topLeft({ x = savedPanelFrame.x, y = savedPanelFrame.y })
+        panel:size({ w = savedPanelFrame.w, h = savedPanelFrame.h })
+      end)
+      savedPanelFrame = nil
+    end
   elseif body.action == "loadFullImage" then
     local ok, err = pcall(function()
       local col = body.col or "recent"
@@ -1328,15 +1370,24 @@ local function handleWebMessage(msg)
     local index = body.index
     local newContent = body.content or ""
     local list = (col == "pinned") and store.pinned or store.recent
-    local found = (index and list[index + 1]) or nil
+    local luaIdx = (index and (index + 1)) or nil
+    local found = luaIdx and list[luaIdx] or nil
     if found and found.type ~= "image" then
       found.content = newContent
       found.title = titleForContent(found.type or "text", newContent)
+      found.ts = hs.timer.secondsSinceEpoch()
+      if col == "recent" and luaIdx and luaIdx > 1 then
+        table.remove(store.recent, luaIdx)
+        table.insert(store.recent, 1, found)
+      end
+      local newIdx = (col == "recent") and 0 or (luaIdx - 1)
       if col == "pinned" then savePinned() else saveRecent() end
       if panel then
-        local js = string.format("applyEdit(%s,%s,%s,%s);",
-          hs.json.encode(col), hs.json.encode(index),
-          hs.json.encode(newContent), hs.json.encode(found.title))
+        local pinnedWeb = prepareItemsForWeb(store.pinned)
+        local recentWeb = prepareItemsForWeb(store.recent)
+        local js = string.format(
+          "applyEditAndClose(%s,%s,%s,%d);",
+          hs.json.encode(pinnedWeb), hs.json.encode(recentWeb), jsonScalar(col), newIdx)
         panel:evaluateJavaScript(js)
       end
     end
@@ -1492,7 +1543,6 @@ local function openPanel()
     end
   end
 
-  print("[clipboard] showPanel reusePanel=" .. tostring(reusePanel))
   if reusePanel then
     -- Reuse: update data, reposition, show
     local pinnedWeb = prepareItemsForWeb(store.pinned)
