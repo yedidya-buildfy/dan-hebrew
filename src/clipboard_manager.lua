@@ -588,8 +588,16 @@ html,body{margin:0;padding:0;font-family:-apple-system,Helvetica,Arial;backgroun
 .item .delete-btn{background:transparent;border:none;color:#c44;padding:4px;border-radius:4px;cursor:pointer;opacity:0;transition:opacity .15s;display:flex;align-items:center}
 .item .pin-btn{background:transparent;border:none;color:#4a8;padding:4px;border-radius:4px;cursor:pointer;opacity:0;transition:opacity .15s;display:flex;align-items:center}
 .item .eye-btn{background:transparent;border:none;color:#7ab;padding:4px;border-radius:4px;cursor:pointer;opacity:0;transition:opacity .15s;display:flex;align-items:center}
-.item:hover .delete-btn,.item:hover .pin-btn,.item:hover .eye-btn,.item.sel .delete-btn,.item.sel .pin-btn,.item.sel .eye-btn{opacity:0.6}
-.item .delete-btn:hover,.item .pin-btn:hover,.item .eye-btn:hover{opacity:1}
+.item .bolt-btn{background:transparent;border:none;color:#e0b94a;padding:4px;border-radius:4px;cursor:pointer;opacity:0;transition:opacity .15s;display:flex;align-items:center}
+.item .bolt-btn.has-hotkey{opacity:0.85}
+.item:hover .delete-btn,.item:hover .pin-btn,.item:hover .eye-btn,.item:hover .bolt-btn,.item.sel .delete-btn,.item.sel .pin-btn,.item.sel .eye-btn,.item.sel .bolt-btn{opacity:0.6}
+.item:hover .bolt-btn.has-hotkey,.item.sel .bolt-btn.has-hotkey{opacity:0.95}
+.item .delete-btn:hover,.item .pin-btn:hover,.item .eye-btn:hover,.item .bolt-btn:hover{opacity:1}
+.item.dragging{opacity:.35}
+.item.drop-before{box-shadow:inset 0 2px 0 0 #4a9eff}
+.item.drop-after{box-shadow:inset 0 -2px 0 0 #4a9eff}
+.item.reorderable{cursor:grab}
+.item.reorderable:active{cursor:grabbing}
 
 /* Search bar */
 .search{grid-column:1 / span 2;padding:8px 10px;background:#1c1c1c;border-radius:10px;margin-bottom:-6px;display:flex;gap:10px;align-items:center}
@@ -619,7 +627,9 @@ html,body{margin:0;padding:0;font-family:-apple-system,Helvetica,Arial;backgroun
 .detail-btn svg{width:14px;height:14px}
 
 /* Hotkey badges */
-.hotkey-badge{display:inline-block;background:#333;color:#aaa;font-size:10px;padding:2px 6px;border-radius:4px;margin-left:4px;white-space:nowrap;flex-shrink:0;font-family:'SF Mono',Menlo,monospace;letter-spacing:.3px}
+.hotkey-badge{display:inline-flex;align-items:center;gap:4px;background:#333;color:#aaa;font-size:10px;padding:2px 6px;border-radius:4px;margin-left:4px;white-space:nowrap;flex-shrink:0;font-family:'SF Mono',Menlo,monospace;letter-spacing:.3px}
+.hotkey-badge-x{cursor:pointer;color:#888;font-family:-apple-system,Helvetica,Arial;font-size:12px;line-height:1;padding:0 2px;border-radius:3px;transition:color .15s,background .15s}
+.hotkey-badge-x:hover{color:#fff;background:#c44}
 
 /* Capture overlay */
 .capture-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.85);z-index:2000;display:flex;flex-direction:column;align-items:center;justify-content:center;opacity:0;transition:opacity .15s ease;pointer-events:none;border-radius:12px}
@@ -676,6 +686,8 @@ html,body{margin:0;padding:0;font-family:-apple-system,Helvetica,Arial;backgroun
 let pinned=]] .. pinnedJSON .. [[, recent=]] .. recentJSON .. [[;
 let selCol='recent', selIdx=0, filter='', hasInteracted=false, detailMode=false, editMode=false;
 let captureMode=false, captureIndex=-1;
+let dragFromIdx=-1, dragHoverIdx=-1, dragHoverBefore=true;
+let dragStartX=0, dragStartY=0, dragActiveEl=null, dragPending=false, dragMoved=false, suppressClick=false;
 const norm=s=>(s||'').toLowerCase();
 const esc=s=>{const d=document.createElement('div');d.textContent=s;return d.innerHTML;};
 const filtered=arr=>!filter?arr:arr.filter(it=>norm(it.content||'').includes(filter)||norm(it.title||'').includes(filter));
@@ -683,6 +695,7 @@ const filtered=arr=>!filter?arr:arr.filter(it=>norm(it.content||'').includes(fil
 const pinIcon=']] .. ICON.pin:gsub("'", "\\'") .. [[';
 const xIcon=']] .. ICON.xMark:gsub("'", "\\'") .. [[';
 const eyeIcon=']] .. ICON.eye:gsub("'", "\\'") .. [[';
+const boltIcon=']] .. ICON.bolt:gsub("'", "\\'") .. [[';
 
 function formatHotkey(hk){
   if(!hk||!hk.key) return '';
@@ -690,6 +703,23 @@ function formatHotkey(hk){
   return mods.concat([hk.key.toUpperCase()]).join('+');
 }
 
+function captureForRow(idx){
+  selCol='pinned';
+  selIdx=idx;
+  hasInteracted=true;
+  renderSelection();
+  openCapture();
+}
+function removeHotkeyForRow(idx){
+  const arr=filtered(pinned);
+  const it=arr[idx]; if(!it||!it.hotkey) return;
+  const actualIdx=pinned.findIndex(p=>p.content===it.content&&p.title===it.title);
+  if(actualIdx===-1) return;
+  if(!confirm('Remove hotkey '+formatHotkey(it.hotkey)+'?')) return;
+  delete pinned[actualIdx].hotkey;
+  render();
+  try{window.webkit.messageHandlers.clips.postMessage({action:'removeHotkey',index:actualIdx});}catch(e){}
+}
 function openCapture(){
   const arr=filtered(pinned);
   if(selCol!=='pinned'||!arr[selIdx]) return;
@@ -764,13 +794,96 @@ function render(){
       inner+='<img src="'+(it.content||'')+'" class="item-img" loading="lazy">';
     }
     inner+='<div class="title">'+esc(it.title||it.content||'(empty)')+'</div>';
-    if(it.hotkey){inner+='<span class="hotkey-badge">'+esc(formatHotkey(it.hotkey))+'</span>';}
-    inner+='<div class="actions"><button class="eye-btn" onclick="event.stopPropagation();previewItem(\'pinned\','+i+')" title="Preview">'+eyeIcon+'</button><button class="delete-btn" onclick="event.stopPropagation();deletePinned('+i+')">'+xIcon+'</button></div>';
+    if(it.hotkey){inner+='<span class="hotkey-badge">'+esc(formatHotkey(it.hotkey))+'<span class="hotkey-badge-x" onclick="event.stopPropagation();removeHotkeyForRow('+i+')" title="Remove hotkey">×</span></span>';}
+    const hkTitle=it.hotkey?'Edit hotkey ('+esc(formatHotkey(it.hotkey))+')':'Assign hotkey';
+    const hkClass='bolt-btn'+(it.hotkey?' has-hotkey':'');
+    inner+='<div class="actions"><button class="'+hkClass+'" onclick="event.stopPropagation();captureForRow('+i+')" title="'+hkTitle+'">'+boltIcon+'</button><button class="eye-btn" onclick="event.stopPropagation();previewItem(\'pinned\','+i+')" title="Preview">'+eyeIcon+'</button><button class="delete-btn" onclick="event.stopPropagation();deletePinned('+i+')">'+xIcon+'</button></div>';
     el.innerHTML=inner;
-    el.onclick=()=>{selCol='pinned';selIdx=i;hasInteracted=true;selectAndCommit('pinned',i);};
+    el.onclick=()=>{
+      if(suppressClick){suppressClick=false;return;}
+      selCol='pinned';selIdx=i;hasInteracted=true;selectAndCommit('pinned',i);
+    };
+    // Drag-to-reorder (only when no search filter is active)
+    if(!filter){
+      el.classList.add('reorderable');
+      el.dataset.pidx=i;
+      el.addEventListener('mousedown',ev=>{
+        if(ev.button!==0) return;
+        if(ev.target.closest('button')) return;
+        dragFromIdx=i;
+        dragHoverIdx=-1;
+        dragHoverBefore=true;
+        dragStartX=ev.clientX;
+        dragStartY=ev.clientY;
+        dragActiveEl=el;
+        dragPending=true;
+        dragMoved=false;
+      });
+    }
     pList.appendChild(el);
   });
 }
+function clearDropIndicators(){
+  document.querySelectorAll('.item.drop-before,.item.drop-after').forEach(e=>e.classList.remove('drop-before','drop-after'));
+}
+function clearDragState(){
+  if(dragActiveEl) dragActiveEl.classList.remove('dragging');
+  clearDropIndicators();
+  dragFromIdx=-1;
+  dragHoverIdx=-1;
+  dragHoverBefore=true;
+  dragActiveEl=null;
+  dragPending=false;
+  dragMoved=false;
+}
+function reorderPinned(from,to){
+  if(from===to||from<0||from>=pinned.length||to<0||to>=pinned.length) return;
+  const item=pinned.splice(from,1)[0];
+  pinned.splice(to,0,item);
+  if(selCol==='pinned'){
+    if(selIdx===from) selIdx=to;
+    else if(from<selIdx&&to>=selIdx) selIdx-=1;
+    else if(from>selIdx&&to<=selIdx) selIdx+=1;
+  }
+  render();
+  try{window.webkit.messageHandlers.clips.postMessage({action:'reorderPinned',from:from,to:to});}catch(e){}
+}
+document.addEventListener('mousemove',ev=>{
+  if(!dragPending||dragFromIdx<0) return;
+  const dx=ev.clientX-dragStartX, dy=ev.clientY-dragStartY;
+  if(!dragMoved){
+    if((dx*dx+dy*dy)<25) return;
+    dragMoved=true;
+    if(dragActiveEl) dragActiveEl.classList.add('dragging');
+  }
+  const target=ev.target.closest ? ev.target.closest('#pinnedList .item') : null;
+  clearDropIndicators();
+  if(!target){
+    dragHoverIdx=-1;
+    return;
+  }
+  const hoverIdx=Number(target.dataset.pidx);
+  if(!Number.isFinite(hoverIdx)||hoverIdx===dragFromIdx){
+    dragHoverIdx=-1;
+    return;
+  }
+  const r=target.getBoundingClientRect();
+  const before=(ev.clientY-r.top)<r.height/2;
+  dragHoverIdx=hoverIdx;
+  dragHoverBefore=before;
+  target.classList.add(before?'drop-before':'drop-after');
+});
+document.addEventListener('mouseup',()=>{
+  if(!dragPending){clearDragState();return;}
+  const wasDragging=dragMoved;
+  const from=dragFromIdx, hoverIdx=dragHoverIdx, before=dragHoverBefore;
+  clearDragState();
+  if(!wasDragging||hoverIdx<0||from<0||from===hoverIdx) return;
+  let toIdx=before?hoverIdx:hoverIdx+1;
+  if(from<toIdx) toIdx-=1;
+  suppressClick=true;
+  reorderPinned(from,toIdx);
+});
 
 // Fast path: only update selection classes without rebuilding DOM
 function renderSelection(){
@@ -1412,6 +1525,20 @@ local function handleWebMessage(msg)
         local recentWeb = prepareItemsForWeb(store.recent)
         local js = string.format("updateData(%s,%s);", hs.json.encode(pinnedWeb), hs.json.encode(recentWeb))
         panel:evaluateJavaScript(js)
+      end
+    end
+  elseif body.action == "reorderPinned" then
+    local from = body.from
+    local to = body.to
+    if type(from) == "number" and type(to) == "number" then
+      local fromIdx = from + 1
+      local toIdx = to + 1
+      local n = #store.pinned
+      if fromIdx >= 1 and fromIdx <= n and toIdx >= 1 and toIdx <= n and fromIdx ~= toIdx then
+        local item = table.remove(store.pinned, fromIdx)
+        table.insert(store.pinned, toIdx, item)
+        savePinned()
+        hs.timer.doAfter(0, registerPinnedHotkeys)
       end
     end
   elseif body.action == "clearRecent" then
