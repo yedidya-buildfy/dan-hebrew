@@ -9,7 +9,7 @@ local clickWatcher   = nil
 
 local defaultConfig = {
   convertLanguage  = { mods = {"cmd","alt"}, key = "K" },
-  clipboardManager = { mods = {"cmd","alt"}, key = "V" },
+  clipboardManager = { mods = {"alt"},       key = "Z" },
 }
 
 local function loadConfig()

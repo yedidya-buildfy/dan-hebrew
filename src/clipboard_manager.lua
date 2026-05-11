@@ -1913,11 +1913,24 @@ function M.start(hotkeyManager)
   loadStore()
   registerPinnedHotkeys()
   startWatcher()
-  hs.hotkey.bind({"alt"}, "Z", function()
+
+  local mods, key = {"alt"}, "Z"
+  if hotkeyManager and hotkeyManager.getConfig then
+    local ok, cfg = pcall(hotkeyManager.getConfig)
+    if ok and cfg and cfg.clipboardManager then
+      mods = cfg.clipboardManager.mods or mods
+      key  = cfg.clipboardManager.key  or key
+    end
+  end
+
+  hs.hotkey.bind(mods, key, function()
     if hotkeyManager then hotkeyManager.incrementUsage('clipboardManager') end
     openPanel()
   end)
-  hs.hotkey.bind({"alt","shift"}, "Z", addPinnedFromClipboard)
+  -- Add-to-pinned uses the same key with Shift added on top of the configured mods.
+  local addMods = { "shift" }
+  for _, m in ipairs(mods) do if m ~= "shift" then table.insert(addMods, m) end end
+  hs.hotkey.bind(addMods, key, addPinnedFromClipboard)
 
   -- Bind Ctrl+1 through Ctrl+9 for direct paste
   for i = 1, 9 do
