@@ -59,6 +59,14 @@ local function utf8Len(s)
   return n
 end
 
+local function utf8Reverse(s)
+  local chars = {}
+  for _, cp in utf8.codes(s or "") do
+    table.insert(chars, 1, utf8.char(cp))
+  end
+  return table.concat(chars)
+end
+
 local function detectEnglish(text)
   local eng, heb = 0, 0
   for _, cp in utf8.codes(text) do
@@ -151,7 +159,11 @@ local function replaceInTerminal(target, converted, fromEng, prevSnap)
     for _ = 1, n do
       hs.eventtap.keyStroke({}, "delete", 0)
     end
-    hs.eventtap.keyStrokes(converted)
+    -- Claude Code (and similar terminal TUIs) renders Hebrew left-to-right,
+    -- so the copied selection arrives in visual order. Reverse before typing
+    -- the English back so the result reads correctly.
+    local toType = (not fromEng) and utf8Reverse(converted) or converted
+    hs.eventtap.keyStrokes(toType)
   end)
 end
 
