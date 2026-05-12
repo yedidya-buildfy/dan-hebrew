@@ -1,7 +1,7 @@
 -- dan-hebrew — Hebrew utilities for Hammerspoon.
-local hotkeyManager  = require("hotkey_manager")
-local clipMan        = require("clipboard_manager")
-local langConverter  = require("language_converter")
+local hotkeyManager       = require("hotkey_manager")
+local clipMan             = require("clipboard_manager")
+local langConverter       = require("language_converter")
 
 local config = hotkeyManager.getConfig()
 
