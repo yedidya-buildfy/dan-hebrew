@@ -7,6 +7,8 @@ local M = {}
 
 local DEBUG = false
 local function log(...) if DEBUG then print("[lang]", ...) end end
+-- Always-on diagnostic for the placeholder walk (temporary; remove once stable).
+local function wlog(...) print("[lang/walk]", ...) end
 
 local ENG_IDS = { "com.apple.keylayout.ABC", "com.apple.keylayout.US" }
 local HEB_IDS = { "com.apple.keylayout.Hebrew" }
@@ -192,6 +194,229 @@ local function countLines(s)
   return n
 end
 
+-- Parse a string into alternating { text | placeholder } segments.
+-- Placeholders are atomic Claude Code attachment tokens that must not be
+-- touched: backspace deletes the whole token and breaks the attachment.
+-- Match both the canonical placeholder shape and the bidi-mirrored variant
+-- the terminal/Cmd+C returns when the surrounding paragraph is RTL Hebrew.
+local PLACEHOLDER_PATTERNS = {
+  "%[Image #%d+%]",
+  "%]Image #%d+%[",
+  "%[Pasted text #%d+%]",
+  "%]Pasted text #%d+%[",
+}
+local function findNextPlaceholder(text, from)
+  local bestS, bestE = nil, nil
+  for _, pat in ipairs(PLACEHOLDER_PATTERNS) do
+    local s, e = string.find(text, pat, from)
+    if s and (not bestS or s < bestS) then bestS, bestE = s, e end
+  end
+  return bestS, bestE
+end
+
+local function parseSegments(text)
+  local segments = {}
+  local i = 1
+  while i <= #text do
+    local s, e = findNextPlaceholder(text, i)
+    if not s then
+      local rest = text:sub(i)
+      if #rest > 0 then
+        table.insert(segments, { kind = "text", s = rest, len = utf8Len(rest) })
+      end
+      return segments
+    end
+    if s > i then
+      local pre = text:sub(i, s - 1)
+      table.insert(segments, { kind = "text", s = pre, len = utf8Len(pre) })
+    end
+    local ph = text:sub(s, e)
+    table.insert(segments, { kind = "placeholder", s = ph, len = utf8Len(ph) })
+    i = e + 1
+  end
+  return segments
+end
+
+local function segmentsHavePlaceholder(segments)
+  for _, seg in ipairs(segments) do
+    if seg.kind == "placeholder" then return true end
+  end
+  return false
+end
+
+-- Detect RTL paragraph by looking for the bidi-mirrored placeholder bracket.
+local function segmentsAreVisualRTL(segments)
+  for _, seg in ipairs(segments) do
+    if seg.kind == "placeholder" and seg.s:sub(1, 1) == "]" then
+      return true
+    end
+  end
+  return false
+end
+
+local function hasHebrew(s)
+  for _, cp in utf8.codes(s or "") do
+    if cp >= 0x05D0 and cp <= 0x05F4 then return true end
+  end
+  return false
+end
+
+-- For a Latin-only segment in an RTL paragraph, bidi puts the LTR letters in
+-- their normal order but moves the adjacent space from one edge to the other.
+-- e.g. logical " hello" renders visually as "hello ".
+local function flipEdgeSpaces(s)
+  local leading  = s:match("^(%s*)") or ""
+  local trailing = s:match("(%s*)$") or ""
+  local middle   = s:sub(#leading + 1, #s - #trailing)
+  return trailing .. middle .. leading
+end
+
+-- Convert segments from Cmd+C visual order into the logical/buffer order the
+-- cursor actually moves through. Called only when the paragraph is RTL.
+local function unbidiSegments(segments)
+  local result = {}
+  for i = #segments, 1, -1 do
+    local seg = segments[i]
+    if seg.kind == "placeholder" then
+      local body = seg.s:sub(2, -2)  -- strip mirrored brackets
+      table.insert(result, { kind = "placeholder", s = "[" .. body .. "]", len = seg.len })
+    elseif hasHebrew(seg.s) then
+      -- Hebrew run is reversed visually; full-reverse recovers logical order.
+      table.insert(result, { kind = "text", s = utf8Reverse(seg.s), len = seg.len })
+    else
+      -- Latin/neutral run keeps char order; only the edge spaces swap sides.
+      table.insert(result, { kind = "text", s = flipEdgeSpaces(seg.s), len = seg.len })
+    end
+  end
+  return result
+end
+
+-- Busy-wait until all modifier keys are physically released. The hotkey
+-- handler often fires while the user is still holding Cmd+Alt, which would
+-- turn subsequent plain Right/Left into Cmd+Right/Cmd+Left.
+local function waitNoMods(timeoutSec)
+  timeoutSec = timeoutSec or 1.0
+  local deadline = hs.timer.secondsSinceEpoch() + timeoutSec
+  while hs.timer.secondsSinceEpoch() < deadline do
+    local m = hs.eventtap.checkKeyboardModifiers()
+    if not (m.cmd or m.alt or m.ctrl or m.shift) then return true end
+    hs.timer.usleep(10000)
+  end
+  return false
+end
+
+-- Move the cursor to the logical start of the input and clear any active
+-- selection. Plain Left collapses a selection to its left edge in most text
+-- fields; Ctrl+A then nudges to the actual line start in TUIs.
+local function collapseToStart()
+  hs.eventtap.keyStroke({}, "left", 20000)
+  hs.timer.usleep(80000)
+  hs.eventtap.keyStroke({"ctrl"}, "a", 20000)
+  hs.timer.usleep(80000)
+end
+
+-- Left-to-right walk that replaces text segments by forward-deleting them
+-- and typing the converted text at the same cursor position. Placeholders
+-- are skipped with a single Right Arrow (atomic). Cursor only ever moves
+-- rightward across the input, so the placeholder boundary on the LEFT side
+-- of the cursor is never disturbed by destructive operations.
+local function replaceInTerminalWalk(segments, fromEng, prevSnap)
+  local expectedParts = {}
+  for _, seg in ipairs(segments) do
+    if seg.kind == "text" then
+      table.insert(expectedParts, convertText(seg.s, fromEng))
+    else
+      table.insert(expectedParts, seg.s)
+    end
+  end
+  local expected = table.concat(expectedParts)
+
+  wlog("expected after walk: " .. expected)
+  hs.timer.doAfter(TIMING.modReleaseSec, function()
+    waitNoMods(1.0)
+    hs.hid.capslock.set(false)
+
+    collapseToStart()
+    wlog("collapsed to start; walking left-to-right with forward-delete + type")
+
+    for idx, seg in ipairs(segments) do
+      if seg.kind == "text" then
+        wlog(string.format("seg %d text len=%d : forwardDelete + type", idx, seg.len))
+        for _ = 1, seg.len do
+          hs.eventtap.keyStroke({}, "forwarddelete", 8000)
+          hs.timer.usleep(10000)
+        end
+        hs.timer.usleep(50000)
+        local conv = convertText(seg.s, fromEng)
+        hs.eventtap.keyStrokes(conv)
+        hs.timer.usleep(60000 + seg.len * 4000)
+      else
+        wlog(string.format("seg %d placeholder %q : single rightArrow", idx, seg.s))
+        hs.eventtap.keyStroke({}, "right", 8000)
+        hs.timer.usleep(80000)
+      end
+    end
+    wlog("walk done; scheduling verify")
+
+    hs.timer.doAfter(0.3, function()
+      hs.pasteboard.setContents("")
+      hs.eventtap.keyStroke({"cmd"}, "a", 0)
+      hs.timer.usleep(80000)
+      hs.eventtap.keyStroke({"cmd"}, "c", 0)
+      hs.timer.usleep(TIMING.clipboardWaitUs)
+      local got = hs.pasteboard.getContents() or ""
+      local gotExtracted = extractPromptInput(got) or got
+
+      -- The TUI displays Hebrew in one direction but Cmd+C returns the
+      -- bidi-reversed form, so a full string match would always fail when
+      -- Hebrew is involved. The only thing we actually need to verify is
+      -- that every original [Image #N] / [Pasted text #N] placeholder
+      -- still appears in the buffer with its number intact — that's what
+      -- proves the underlying attachment binding survived.
+      local function collectPlaceholderNumbers(text)
+        local nums = {}
+        for _, pat in ipairs(PLACEHOLDER_PATTERNS) do
+          for n in text:gmatch(pat:gsub("%%d%+", "(%%d+)")) do
+            table.insert(nums, n)
+          end
+        end
+        table.sort(nums)
+        return nums
+      end
+      local origNums = {}
+      for _, seg in ipairs(segments) do
+        if seg.kind == "placeholder" then
+          local n = seg.s:match("#(%d+)")
+          if n then table.insert(origNums, n) end
+        end
+      end
+      table.sort(origNums)
+      local gotNums = collectPlaceholderNumbers(gotExtracted)
+
+      local function sameNumbers(a, b)
+        if #a ~= #b then return false end
+        for i = 1, #a do if a[i] ~= b[i] then return false end end
+        return true
+      end
+
+      if sameNumbers(origNums, gotNums) then
+        wlog(string.format("verify OK — %d placeholder(s) preserved", #origNums))
+      else
+        wlog("verify FAILED — placeholder mismatch")
+        wlog("  original numbers: [" .. table.concat(origNums, ",") .. "]")
+        wlog("  got numbers:      [" .. table.concat(gotNums, ",") .. "]")
+        wlog("  got buffer:       " .. gotExtracted)
+        hs.alert.show("Convert: image attachment lost", 2.0)
+      end
+
+      hs.eventtap.keyStroke({"cmd"}, "right", 5000)
+      hs.timer.usleep(20000)
+      if fromEng then switchToHebrew() else switchToEnglish() end
+      restoreClipboard(prevSnap)
+    end)
+  end)
+end
+
 -- Terminal path: shell caret is decoupled from mouse selection, so we can
 -- only reliably replace text that ends at the line's end. Switch input source
 -- BEFORE injecting so RTL terminals don't visually reverse Latin output.
@@ -199,26 +424,73 @@ local function replaceInTerminal(target, converted, fromEng, prevSnap)
   local hasPrompt = string.find(target, PROMPT_GLYPH, 1, true) ~= nil
   local fastPath  = false
   local lines     = 1
+  local sourceText = target  -- text we use for placeholder detection
+  wlog("replaceInTerminal entry: hasPrompt=" .. tostring(hasPrompt) .. " targetBytes=" .. #target)
 
   if hasPrompt then
     local trimmed = extractPromptInput(target)
     if not trimmed then
-      log("terminal: ❯ present but extraction empty/oversized, aborting")
+      wlog("ABORT: ❯ present but extraction empty/oversized")
       restoreClipboard(prevSnap)
       return
     end
-    -- Re-detect language on the extracted input only — the full Cmd+A blob
-    -- is dominated by chat history in another script and would mislead us.
+    wlog(string.format("trimmed input (utf8Len=%d): %q", utf8Len(trimmed), trimmed))
     local promptFromEng = detectEnglish(trimmed)
     if promptFromEng == nil then
-      log("terminal: extracted input has no detectable script, aborting")
+      wlog("ABORT: extracted input has no detectable script")
       restoreClipboard(prevSnap)
       return
     end
-    fromEng   = promptFromEng
-    target    = trimmed
-    converted = convertText(trimmed, fromEng)
-    lines     = countLines(trimmed)
+    fromEng = promptFromEng
+    sourceText = trimmed
+  end
+
+  wlog("about to parse segments. sourceText utf8Len=" .. utf8Len(sourceText))
+
+  -- Placeholder branch runs whether or not the selection included ❯ — a
+  -- mouse-selected input still has [Image #N] tokens we must skip.
+  local segments = parseSegments(sourceText)
+  wlog(string.format("parseSegments: %d segs, hasPlaceholder=%s",
+    #segments, tostring(segmentsHavePlaceholder(segments))))
+  for i, seg in ipairs(segments) do
+    wlog(string.format("  parsed seg %d: %s len=%d %q", i, seg.kind, seg.len, seg.s))
+  end
+  if segmentsHavePlaceholder(segments) then
+    -- If the paragraph is RTL (mirrored brackets), Cmd+C returned chars in
+    -- bidi-visual order but the cursor moves logically — un-bidi before
+    -- walking so segment boundaries align with cursor positions.
+    if segmentsAreVisualRTL(segments) then
+      wlog("RTL paragraph detected; converting visual segments to logical order")
+      segments = unbidiSegments(segments)
+      for i, seg in ipairs(segments) do
+        wlog(string.format("  logical seg %d: %s len=%d %q", i, seg.kind, seg.len, seg.s))
+      end
+    end
+
+    -- Re-detect direction on text segments only — placeholder bodies
+    -- ("Image", "Pasted") would otherwise bias the Latin count.
+    local textOnly = {}
+    for _, seg in ipairs(segments) do
+      if seg.kind == "text" then table.insert(textOnly, seg.s) end
+    end
+    local segFromEng = detectEnglish(table.concat(textOnly))
+    if segFromEng == nil then
+      wlog("text-only detection inconclusive, using current fromEng=" .. tostring(fromEng))
+    else
+      fromEng = segFromEng
+    end
+    wlog("walk start. fromEng=" .. tostring(fromEng) .. " segs=" .. #segments)
+    for i, seg in ipairs(segments) do
+      wlog(string.format("  seg %d: %s len=%d %q", i, seg.kind, seg.len, seg.s))
+    end
+    replaceInTerminalWalk(segments, fromEng, prevSnap)
+    return
+  end
+
+  if hasPrompt then
+    target    = sourceText
+    converted = convertText(sourceText, fromEng)
+    lines     = countLines(sourceText)
     fastPath  = true
   end
 
