@@ -10,7 +10,27 @@ local pinnedPath = storeDir .. "/clipboard-pinned.json"
 local recentPath = storeDir .. "/clipboard-recent.json"
 local legacyPath = storeDir .. "/clipboard.json"  -- For migration
 local imageDir = storeDir .. "/clipboard-images"
+local settingsPath = storeDir .. "/clipboard-settings.json"
 local maxRecent = 100
+local MAX_RECENT_MIN, MAX_RECENT_MAX = 5, 1000
+
+local function loadSettings()
+  local f = io.open(settingsPath, "r")
+  if not f then return end
+  local data = f:read("*a"); f:close()
+  local ok, parsed = pcall(hs.json.decode, data)
+  if ok and type(parsed) == "table" and type(parsed.maxRecent) == "number" then
+    local n = math.floor(parsed.maxRecent)
+    if n >= MAX_RECENT_MIN and n <= MAX_RECENT_MAX then maxRecent = n end
+  end
+end
+
+local function saveSettings()
+  local f = io.open(settingsPath, "w")
+  if f then f:write(hs.json.encode({ maxRecent = maxRecent }, true)); f:close() end
+end
+
+loadSettings()
 local store = { pinned = {}, recent = {} }
 local watcher, panel, clickWatcher, keyWatcher = nil, nil, nil, nil
 local savedPanelFrame = nil  -- remembers panel size before image preview enlargement
@@ -571,6 +591,13 @@ html,body{margin:0;padding:0;font-family:-apple-system,Helvetica,Arial;backgroun
 .header-btn svg{width:16px;height:16px}
 .list{flex:1;overflow:auto;outline:none}
 
+/* Filter tabs (Recent column) */
+.filter-tabs{display:flex;gap:4px;padding:6px 8px;background:#161616;border-bottom:1px solid #222}
+.filter-tab{flex:1;background:transparent;border:1px solid #2a2a2a;color:#aaa;padding:4px 8px;border-radius:6px;cursor:pointer;font-size:11px;transition:background .15s,color .15s,border-color .15s,box-shadow .15s}
+.filter-tab:hover{background:#222;color:#ddd}
+.filter-tab.active{background:#1a2a3a;color:#4a9eff;border-color:#4a9eff}
+.filter-tab.focused{box-shadow:0 0 0 2px #4a9eff;outline:none}
+
 /* List items — always compact */
 .item{padding:7px 10px;border-bottom:1px solid #1a1a1a;cursor:pointer;display:flex;align-items:center;gap:8px;position:relative;transition:background .15s ease}
 .item:last-child{border-bottom:none}
@@ -603,6 +630,11 @@ html,body{margin:0;padding:0;font-family:-apple-system,Helvetica,Arial;backgroun
 .search{grid-column:1 / span 2;padding:8px 10px;background:#1c1c1c;border-radius:10px;margin-bottom:-6px;display:flex;gap:10px;align-items:center}
 .search input{flex:1;background:#111;border:1px solid #333;color:#eee;padding:8px 10px;border-radius:8px;font-size:13px}
 .hint{font-size:11px;opacity:.6;direction:rtl;text-align:right;white-space:nowrap}
+.limit-wrap{display:flex;align-items:center;gap:6px;font-size:11px;color:#aaa;white-space:nowrap}
+.limit-wrap label{opacity:.75}
+.limit-wrap input{width:60px;background:#111;border:1px solid #333;color:#eee;padding:6px 8px;border-radius:6px;font-size:12px;text-align:center;-moz-appearance:textfield}
+.limit-wrap input::-webkit-outer-spin-button,.limit-wrap input::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+.limit-wrap input:focus{border-color:#4a9eff;outline:none}
 
 /* Detail view overlay */
 .detail-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:#111;z-index:1000;display:flex;flex-direction:column;opacity:0;transition:opacity .15s ease;pointer-events:none;border-radius:12px}
@@ -642,7 +674,10 @@ html,body{margin:0;padding:0;font-family:-apple-system,Helvetica,Arial;backgroun
 <div class="container">
   <div class="search">
     <input id="q" type="text" placeholder="Search...">
-    <div class="hint">Space detail | H hotkey | Enter paste | Arrows navigate</div>
+    <div class="limit-wrap" title="Max recent copies kept before auto-delete">
+      <label for="maxRecentInput">Limit:</label>
+      <input id="maxRecentInput" type="number" min="]] .. MAX_RECENT_MIN .. [[" max="]] .. MAX_RECENT_MAX .. [[" step="1" value="]] .. maxRecent .. [[">
+    </div>
   </div>
   <div class="column" id="recentCol" tabindex="0" aria-label="Recent">
     <div class="header">
@@ -651,6 +686,11 @@ html,body{margin:0;padding:0;font-family:-apple-system,Helvetica,Arial;backgroun
         <button class="header-btn" onclick="clearRecent()" title="Clear all recent items">]] .. ICON.trash .. [[</button>
         <button class="header-btn" onclick="pinSelected()" title="Pin selected item">]] .. ICON.pin .. [[</button>
       </div>
+    </div>
+    <div class="filter-tabs" id="filterTabs">
+      <button class="filter-tab active" data-tf="all" onclick="setTypeFilter('all')">All</button>
+      <button class="filter-tab" data-tf="images" onclick="setTypeFilter('images')">Images</button>
+      <button class="filter-tab" data-tf="text" onclick="setTypeFilter('text')">Text</button>
     </div>
     <div class="list" id="recentList"></div>
   </div>
@@ -686,11 +726,36 @@ html,body{margin:0;padding:0;font-family:-apple-system,Helvetica,Arial;backgroun
 let pinned=]] .. pinnedJSON .. [[, recent=]] .. recentJSON .. [[;
 let selCol='recent', selIdx=0, filter='', hasInteracted=false, detailMode=false, editMode=false;
 let captureMode=false, captureIndex=-1;
+let typeFilter='all';
+const FILTER_ORDER=['all','images','text'];
 let dragFromIdx=-1, dragHoverIdx=-1, dragHoverBefore=true;
 let dragStartX=0, dragStartY=0, dragActiveEl=null, dragPending=false, dragMoved=false, suppressClick=false;
 const norm=s=>(s||'').toLowerCase();
 const esc=s=>{const d=document.createElement('div');d.textContent=s;return d.innerHTML;};
-const filtered=arr=>!filter?arr:arr.filter(it=>norm(it.content||'').includes(filter)||norm(it.title||'').includes(filter));
+const filtered=arr=>{
+  let out=!filter?arr:arr.filter(it=>norm(it.content||'').includes(filter)||norm(it.title||'').includes(filter));
+  if(arr===recent && typeFilter!=='all'){
+    out=out.filter(it=>typeFilter==='images' ? it.type==='image' : it.type!=='image');
+  }
+  return out;
+};
+function setTypeFilter(name){
+  if(!FILTER_ORDER.includes(name)) return;
+  typeFilter=name;
+  selIdx=0;
+  render();
+}
+function cyclePicker(d){
+  const i=FILTER_ORDER.indexOf(typeFilter);
+  const n=FILTER_ORDER.length;
+  setTypeFilter(FILTER_ORDER[((i+d)%n+n)%n]);
+}
+function updatePickerUI(){
+  document.querySelectorAll('#filterTabs .filter-tab').forEach(el=>{
+    el.classList.toggle('active', el.dataset.tf===typeFilter);
+    el.classList.toggle('focused', selCol==='picker' && el.dataset.tf===typeFilter);
+  });
+}
 
 const pinIcon=']] .. ICON.pin:gsub("'", "\\'") .. [[';
 const xIcon=']] .. ICON.xMark:gsub("'", "\\'") .. [[';
@@ -770,6 +835,7 @@ function hotkeyResult(success, message){
 }
 
 function render(){
+  updatePickerUI();
   const r=filtered(recent), p=filtered(pinned);
   const rList=document.getElementById('recentList'), pList=document.getElementById('pinnedList');
   rList.innerHTML=''; pList.innerHTML='';
@@ -887,6 +953,7 @@ document.addEventListener('mouseup',()=>{
 
 // Fast path: only update selection classes without rebuilding DOM
 function renderSelection(){
+  updatePickerUI();
   const rList=document.getElementById('recentList'), pList=document.getElementById('pinnedList');
   Array.from(rList.children).forEach((el,i)=>{
     el.classList.toggle('sel', selCol==='recent'&&selIdx===i);
@@ -894,7 +961,7 @@ function renderSelection(){
   Array.from(pList.children).forEach((el,i)=>{
     el.classList.toggle('sel', selCol==='pinned'&&selIdx===i);
   });
-  ensureVisible();
+  if(selCol==='recent'||selCol==='pinned') ensureVisible();
 }
 
 function clampSel(){
@@ -1182,14 +1249,31 @@ document.addEventListener('keydown',e=>{
     return;
   }
 
-  if(e.key==='ArrowDown'){e.preventDefault();move(1);}
-  else if(e.key==='ArrowUp'){e.preventDefault();move(-1);}
-  else if(e.key==='ArrowLeft'||e.key==='ArrowRight'){e.preventDefault();switchCol();}
-  else if(e.key===' '&&!searchFocused){e.preventDefault();openDetail();}
+  if(e.key==='ArrowDown'){
+    e.preventDefault();
+    if(selCol==='picker'){selCol='recent';selIdx=0;hasInteracted=true;renderSelection();}
+    else{move(1);}
+  }
+  else if(e.key==='ArrowUp'){
+    e.preventDefault();
+    if(selCol==='picker'){/* already at top */}
+    else if(selCol==='recent'&&selIdx===0){selCol='picker';hasInteracted=true;renderSelection();}
+    else{move(-1);}
+  }
+  else if(e.key==='ArrowLeft'||e.key==='ArrowRight'){
+    e.preventDefault();
+    if(selCol==='picker'){cyclePicker(e.key==='ArrowLeft'?-1:1);}
+    else{switchCol();}
+  }
+  else if(e.key===' '&&!searchFocused){
+    e.preventDefault();
+    if(selCol!=='picker') openDetail();
+  }
   else if((e.key==='h'||e.key==='H')&&selCol==='pinned'&&!searchFocused){e.preventDefault();openCapture();}
   else if(e.key==='Enter'){
     e.preventDefault();
-    selectAndCommit(selCol,selIdx);
+    if(selCol==='picker'){selCol='recent';selIdx=0;hasInteracted=true;renderSelection();}
+    else{selectAndCommit(selCol,selIdx);}
   }
   else if(e.key==='Escape'){
     e.preventDefault();
@@ -1200,6 +1284,21 @@ document.addEventListener('keydown',e=>{
 const searchInput=document.getElementById('q');
 searchInput.addEventListener('focus',()=>{try{window.webkit.messageHandlers.clips.postMessage({action:'enableTextEntry'});}catch(e){}});
 searchInput.addEventListener('blur',()=>{try{window.webkit.messageHandlers.clips.postMessage({action:'disableTextEntry'});}catch(e){}});
+const maxRecentInput=document.getElementById('maxRecentInput');
+const MAX_LO=]] .. MAX_RECENT_MIN .. [[, MAX_HI=]] .. MAX_RECENT_MAX .. [[;
+let maxRecentDebounce=null;
+function commitMaxRecent(){
+  let v=parseInt(maxRecentInput.value,10);
+  if(!Number.isFinite(v)) return;
+  if(v<MAX_LO) v=MAX_LO;
+  if(v>MAX_HI) v=MAX_HI;
+  maxRecentInput.value=String(v);
+  try{window.webkit.messageHandlers.clips.postMessage({action:'setMaxRecent',value:v});}catch(e){}
+}
+maxRecentInput.addEventListener('focus',()=>{try{window.webkit.messageHandlers.clips.postMessage({action:'enableTextEntry'});}catch(e){}});
+maxRecentInput.addEventListener('blur',()=>{try{window.webkit.messageHandlers.clips.postMessage({action:'disableTextEntry'});}catch(e){}commitMaxRecent();});
+maxRecentInput.addEventListener('input',()=>{clearTimeout(maxRecentDebounce);maxRecentDebounce=setTimeout(commitMaxRecent,400);});
+maxRecentInput.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();commitMaxRecent();maxRecentInput.blur();}});
 searchInput.addEventListener('input',e=>{hasInteracted=true;filter=norm(e.target.value||'');selIdx=0;render();});
 window.addEventListener('load',()=>{render();});
 </script></body></html>
@@ -1634,6 +1733,31 @@ local function handleWebMessage(msg)
     -- No-op, text entry always enabled
   elseif body.action == "disableTextEntry" then
     -- No-op, text entry always enabled
+  elseif body.action == "setMaxRecent" then
+    local v = tonumber(body.value)
+    if v then
+      v = math.floor(v)
+      if v < MAX_RECENT_MIN then v = MAX_RECENT_MIN end
+      if v > MAX_RECENT_MAX then v = MAX_RECENT_MAX end
+      if v ~= maxRecent then
+        maxRecent = v
+        saveSettings()
+        local trimmed = false
+        while #store.recent > maxRecent do
+          table.remove(store.recent)
+          trimmed = true
+        end
+        if trimmed then
+          saveRecent()
+          if panel then
+            local pinnedWeb = prepareItemsForWeb(store.pinned)
+            local recentWeb = prepareItemsForWeb(store.recent)
+            local js = string.format("updateData(%s,%s);", hs.json.encode(pinnedWeb), hs.json.encode(recentWeb))
+            panel:evaluateJavaScript(js)
+          end
+        end
+      end
+    end
   end
 end
 

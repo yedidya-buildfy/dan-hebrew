@@ -11,6 +11,13 @@ hs.hotkey.bind(config.convertLanguage.mods, config.convertLanguage.key, function
   langConverter.run()
 end)
 
+-- Cmd+Alt+Z — select all, then convert (EN ⇄ HE).
+hs.hotkey.bind({"cmd","alt"}, "Z", function()
+  hotkeyManager.incrementUsage("convertLanguage")
+  hs.eventtap.keyStroke({"cmd"}, "a", 0)
+  hs.timer.doAfter(0.05, function() langConverter.run() end)
+end)
+
 -- Cmd+Alt+V (default) — clipboard history panel.
 clipMan.start(hotkeyManager)
 
