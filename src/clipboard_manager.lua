@@ -1182,6 +1182,9 @@ function updateData(newPinned, newRecent){
   document.getElementById('captureOverlay').classList.remove('active');
   const q=document.getElementById('q'); if(q) q.value='';
   render();
+  // Fresh open: always start at the top so the newest copy is visible.
+  document.getElementById('recentList').scrollTop=0;
+  document.getElementById('pinnedList').scrollTop=0;
 }
 
 document.addEventListener('keydown',e=>{
