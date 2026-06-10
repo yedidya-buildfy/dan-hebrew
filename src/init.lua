@@ -11,9 +11,9 @@ hs.hotkey.bind(config.convertLanguage.mods, config.convertLanguage.key, function
   langConverter.run()
 end)
 
--- Cmd+Alt+Z — select all, then convert (EN ⇄ HE).
-hs.hotkey.bind({"cmd","alt"}, "Z", function()
-  hotkeyManager.incrementUsage("convertLanguage")
+-- Cmd+Alt+Z (default) — select all, then convert (EN ⇄ HE).
+hs.hotkey.bind(config.convertLanguageAll.mods, config.convertLanguageAll.key, function()
+  hotkeyManager.incrementUsage("convertLanguageAll")
   hs.eventtap.keyStroke({"cmd"}, "a", 0)
   hs.timer.doAfter(0.05, function() langConverter.run() end)
 end)
@@ -21,8 +21,9 @@ end)
 -- Cmd+Alt+V (default) — clipboard history panel.
 clipMan.start(hotkeyManager)
 
--- Cmd+Alt+H — open the hotkey manager UI.
-hs.hotkey.bind({"cmd","alt"}, "H", function()
+-- Cmd+Alt+H (default) — open the hotkey manager UI.
+hs.hotkey.bind(config.openManager.mods, config.openManager.key, function()
+  hotkeyManager.incrementUsage("openManager")
   hotkeyManager.openManager()
 end)
 

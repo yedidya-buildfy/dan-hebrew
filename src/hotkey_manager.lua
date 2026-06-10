@@ -8,8 +8,10 @@ local managerPanel   = nil
 local clickWatcher   = nil
 
 local defaultConfig = {
-  convertLanguage  = { mods = {"cmd","alt"}, key = "K" },
-  clipboardManager = { mods = {"alt"},       key = "Z" },
+  convertLanguage    = { mods = {"cmd","alt"}, key = "K" },
+  convertLanguageAll = { mods = {"cmd","alt"}, key = "Z" },
+  clipboardManager   = { mods = {"alt"},       key = "Z" },
+  openManager        = { mods = {"cmd","alt"}, key = "H" },
 }
 
 local function loadConfig()
@@ -49,7 +51,7 @@ local function loadUsageStats()
     local ok, parsed = pcall(hs.json.decode, data)
     if ok and type(parsed) == "table" then return parsed end
   end
-  return { convertLanguage = 0, clipboardManager = 0 }
+  return { convertLanguage = 0, convertLanguageAll = 0, clipboardManager = 0, openManager = 0 }
 end
 
 local function saveUsageStats(stats)
@@ -64,7 +66,7 @@ function M.incrementUsage(name)
 end
 
 function M.getUsageStats()    return loadUsageStats() end
-function M.resetUsageStats()  saveUsageStats({ convertLanguage = 0, clipboardManager = 0 }) end
+function M.resetUsageStats()  saveUsageStats({ convertLanguage = 0, convertLanguageAll = 0, clipboardManager = 0, openManager = 0 }) end
 function M.getConfig()        return loadConfig() end
 
 local function buildManagerHTML(config, usage)
@@ -96,29 +98,7 @@ button.primary:hover{background:#3a8eef}
 <h2>⌨️ ניהול קיצורי מקלדת</h2>
 <div id="status" class="status"></div>
 
-<div class="row">
-  <div class="title">המרת שפה (EN ⇄ HE):</div>
-  <div class="controls">
-    <label><input type="checkbox" class="checkbox" id="cmd_convert"> ⌘ Cmd</label>
-    <label><input type="checkbox" class="checkbox" id="alt_convert"> ⌥ Opt</label>
-    <label><input type="checkbox" class="checkbox" id="ctrl_convert"> ⌃ Ctrl</label>
-    <label><input type="checkbox" class="checkbox" id="shift_convert"> ⇧ Shift</label>
-    <input type="text" id="key_convert" maxlength="1" placeholder="K">
-  </div>
-  <span class="usage" id="usage_convert">0×</span>
-</div>
-
-<div class="row">
-  <div class="title">מנהל Clipboard:</div>
-  <div class="controls">
-    <label><input type="checkbox" class="checkbox" id="cmd_clip"> ⌘ Cmd</label>
-    <label><input type="checkbox" class="checkbox" id="alt_clip"> ⌥ Opt</label>
-    <label><input type="checkbox" class="checkbox" id="ctrl_clip"> ⌃ Ctrl</label>
-    <label><input type="checkbox" class="checkbox" id="shift_clip"> ⇧ Shift</label>
-    <input type="text" id="key_clip" maxlength="1" placeholder="V">
-  </div>
-  <span class="usage" id="usage_clip">0×</span>
-</div>
+<div id="rows"></div>
 
 <div class="buttons">
   <button class="primary" onclick="saveHotkeys()">💾 שמור</button>
@@ -132,32 +112,47 @@ button.primary:hover{background:#3a8eef}
 const config = %s;
 const usage = %s;
 
-function loadCurrent() {
-  for (const [prefix, key] of [['convert','convertLanguage'],['clip','clipboardManager']]) {
-    document.getElementById('cmd_'+prefix).checked   = config[key].mods.includes('cmd');
-    document.getElementById('alt_'+prefix).checked   = config[key].mods.includes('alt');
-    document.getElementById('ctrl_'+prefix).checked  = config[key].mods.includes('ctrl');
-    document.getElementById('shift_'+prefix).checked = config[key].mods.includes('shift');
-    document.getElementById('key_'+prefix).value     = config[key].key;
-  }
-  document.getElementById('usage_convert').textContent = (usage.convertLanguage  || 0) + '×';
-  document.getElementById('usage_clip').textContent    = (usage.clipboardManager || 0) + '×';
+const FEATURES = [
+  { key:'convertLanguage',    title:'המרת שפה (EN ⇄ HE):',        defKey:'K' },
+  { key:'convertLanguageAll', title:'בחר הכל + המרת שפה:',         defKey:'Z' },
+  { key:'clipboardManager',   title:'מנהל Clipboard:',             defKey:'V' },
+  { key:'openManager',        title:'ניהול קיצורים (חלון זה):',    defKey:'H' },
+];
+const MODS = [['cmd','⌘ Cmd'],['alt','⌥ Opt'],['ctrl','⌃ Ctrl'],['shift','⇧ Shift']];
+
+function buildRows() {
+  document.getElementById('rows').innerHTML = FEATURES.map(f =>
+    '<div class="row"><div class="title">' + f.title + '</div><div class="controls">' +
+    MODS.map(([m, lbl]) =>
+      '<label><input type="checkbox" class="checkbox" id="' + m + '_' + f.key + '"> ' + lbl + '</label>'
+    ).join('') +
+    '<input type="text" id="key_' + f.key + '" maxlength="1" placeholder="' + f.defKey + '">' +
+    '</div><span class="usage" id="usage_' + f.key + '">0×</span></div>'
+  ).join('');
 }
 
-function getMods(prefix) {
-  const m = [];
-  if (document.getElementById('cmd_'+prefix).checked)   m.push('cmd');
-  if (document.getElementById('alt_'+prefix).checked)   m.push('alt');
-  if (document.getElementById('ctrl_'+prefix).checked)  m.push('ctrl');
-  if (document.getElementById('shift_'+prefix).checked) m.push('shift');
-  return m;
+function loadCurrent() {
+  buildRows();
+  for (const f of FEATURES) {
+    const cfg = config[f.key] || { mods: [], key: f.defKey };
+    for (const [m] of MODS) document.getElementById(m + '_' + f.key).checked = cfg.mods.includes(m);
+    document.getElementById('key_' + f.key).value = cfg.key;
+    document.getElementById('usage_' + f.key).textContent = (usage[f.key] || 0) + '×';
+  }
+}
+
+function getMods(featureKey) {
+  return MODS.map(([m]) => m).filter(m => document.getElementById(m + '_' + featureKey).checked);
 }
 
 function saveHotkeys() {
-  const newConfig = {
-    convertLanguage:  { mods: getMods('convert'), key: (document.getElementById('key_convert').value||'K').toUpperCase() },
-    clipboardManager: { mods: getMods('clip'),    key: (document.getElementById('key_clip').value||'V').toUpperCase() },
-  };
+  const newConfig = {};
+  for (const f of FEATURES) {
+    newConfig[f.key] = {
+      mods: getMods(f.key),
+      key: (document.getElementById('key_' + f.key).value || f.defKey).toUpperCase(),
+    };
+  }
   try {
     window.webkit.messageHandlers.hotkeyManager.postMessage({ action:'save', config:newConfig });
     showStatus('✓ נשמר. טוען מחדש…', 'success');
@@ -175,8 +170,7 @@ function resetStats() {
   try {
     window.webkit.messageHandlers.hotkeyManager.postMessage({ action:'resetStats' });
     showStatus('✓ מונים אופסו', 'success');
-    document.getElementById('usage_convert').textContent = '0×';
-    document.getElementById('usage_clip').textContent    = '0×';
+    for (const f of FEATURES) document.getElementById('usage_' + f.key).textContent = '0×';
   } catch(e) { showStatus('✗ שגיאה', 'error'); }
 }
 
@@ -238,7 +232,7 @@ function M.openManager()
   hs.dockicon.hide()
   hs.timer.usleep(50000)
 
-  local w, h = 620, 280
+  local w, h = 620, 400
   local rect, _, tl = computeSmartRect(w, h)
 
   local ucc = hs.webview.usercontent.new("hotkeyManager")
