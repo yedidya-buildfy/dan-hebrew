@@ -74,6 +74,8 @@ local function utf8Reverse(s)
 end
 
 local function detectEnglish(text)
+  -- URLs are never converted, so they shouldn't vote on the detected language.
+  text = text:gsub("%a[%w+.%-]*://%S+", ""):gsub("%f[%w]www%.%S+", "")
   local eng, heb = 0, 0
   for _, cp in utf8.codes(text) do
     if (cp >= 0x41 and cp <= 0x5A) or (cp >= 0x61 and cp <= 0x7A) then
@@ -86,7 +88,21 @@ local function detectEnglish(text)
   return eng >= heb
 end
 
-local function convertText(text, fromEng)
+-- URLs must never be converted: scheme://… , www.… (frontier so "awww." doesn't match).
+local URL_PATTERNS = {
+  "%a[%w+.%-]*://%S+",
+  "%f[%w]www%.%S+",
+}
+local function findNextUrl(text, from)
+  local bestS, bestE = nil, nil
+  for _, pat in ipairs(URL_PATTERNS) do
+    local s, e = string.find(text, pat, from)
+    if s and (not bestS or s < bestS) then bestS, bestE = s, e end
+  end
+  return bestS, bestE
+end
+
+local function convertChars(text, fromEng)
   local out = {}
   for _, cp in utf8.codes(text) do
     local ch = utf8.char(cp)
@@ -95,6 +111,24 @@ local function convertText(text, fromEng)
     else
       table.insert(out, hebToEng[ch] or ch)
     end
+  end
+  return table.concat(out)
+end
+
+local function convertText(text, fromEng)
+  local out = {}
+  local i = 1
+  while i <= #text do
+    local s, e = findNextUrl(text, i)
+    if not s then
+      table.insert(out, convertChars(text:sub(i), fromEng))
+      break
+    end
+    if s > i then
+      table.insert(out, convertChars(text:sub(i, s - 1), fromEng))
+    end
+    table.insert(out, text:sub(s, e))
+    i = e + 1
   end
   return table.concat(out)
 end
