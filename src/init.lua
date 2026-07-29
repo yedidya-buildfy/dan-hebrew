@@ -27,4 +27,7 @@ hs.hotkey.bind(config.openManager.mods, config.openManager.key, function()
   hotkeyManager.openManager()
 end)
 
+-- Lets `open -g hammerspoon://reload` reload the config without the menu bar.
+hs.urlevent.bind("reload", function() hs.reload() end)
+
 hs.alert.show("✓ dan-hebrew loaded")

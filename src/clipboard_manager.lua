@@ -5,6 +5,8 @@
 
 local M = {}
 
+local bidiClip = require("bidi_clipboard")
+
 local storeDir = os.getenv("HOME") .. "/.hammerspoon"
 local pinnedPath = storeDir .. "/clipboard-pinned.json"
 local recentPath = storeDir .. "/clipboard-recent.json"
@@ -58,6 +60,10 @@ local function setInputSourceByList(list)
 end
 
 local function pasteWithCmdV()
+  -- Whatever we are about to paste was put on the clipboard on purpose, in the
+  -- direction it is meant to go. Keep the corrector off it — above all when it
+  -- is the flip button's output, which it would otherwise turn straight back.
+  bidiClip.hold(2)
   local prev = hs.keycodes.currentSourceID()
   local capsWasOn = hs.hid.capslock.get()
   setInputSourceByList(ENG_IDS)           -- temporary switch to English so 'v' is mapped
@@ -541,6 +547,7 @@ local ICON = {
   eye = '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" width="14" height="14"><path stroke-linecap="round" stroke-linejoin="round" d="M2.036 12.322a1.012 1.012 0 0 1 0-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178Z"/><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z"/></svg>',
   pencil = '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" width="14" height="14"><path stroke-linecap="round" stroke-linejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L6.832 19.82a4.5 4.5 0 0 1-1.897 1.13l-2.685.8.8-2.685a4.5 4.5 0 0 1 1.13-1.897L16.863 4.487Zm0 0L19.5 7.125"/></svg>',
   check = '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" width="14" height="14"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5"/></svg>',
+  flip = '<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" width="14" height="14"><path stroke-linecap="round" stroke-linejoin="round" d="M7.5 21 3 16.5m0 0L7.5 12M3 16.5h13.5m0-13.5L21 7.5m0 0L16.5 12M21 7.5H7.5"/></svg>',
 }
 
 ------------------------------------------------------------
@@ -617,9 +624,10 @@ html,body{margin:0;padding:0;font-family:-apple-system,Helvetica,Arial;backgroun
 .item .eye-btn{background:transparent;border:none;color:#7ab;padding:4px;border-radius:4px;cursor:pointer;opacity:0;transition:opacity .15s;display:flex;align-items:center}
 .item .bolt-btn{background:transparent;border:none;color:#e0b94a;padding:4px;border-radius:4px;cursor:pointer;opacity:0;transition:opacity .15s;display:flex;align-items:center}
 .item .bolt-btn.has-hotkey{opacity:0.85}
-.item:hover .delete-btn,.item:hover .pin-btn,.item:hover .eye-btn,.item:hover .bolt-btn,.item.sel .delete-btn,.item.sel .pin-btn,.item.sel .eye-btn,.item.sel .bolt-btn{opacity:0.6}
+.item .flip-btn{background:transparent;border:none;color:#b98ae0;padding:4px;border-radius:4px;cursor:pointer;opacity:0;transition:opacity .15s;display:flex;align-items:center}
+.item:hover .delete-btn,.item:hover .pin-btn,.item:hover .eye-btn,.item:hover .bolt-btn,.item:hover .flip-btn,.item.sel .delete-btn,.item.sel .pin-btn,.item.sel .eye-btn,.item.sel .bolt-btn,.item.sel .flip-btn{opacity:0.6}
 .item:hover .bolt-btn.has-hotkey,.item.sel .bolt-btn.has-hotkey{opacity:0.95}
-.item .delete-btn:hover,.item .pin-btn:hover,.item .eye-btn:hover,.item .bolt-btn:hover{opacity:1}
+.item .delete-btn:hover,.item .pin-btn:hover,.item .eye-btn:hover,.item .bolt-btn:hover,.item .flip-btn:hover{opacity:1}
 .item.dragging{opacity:.35}
 .item.drop-before{box-shadow:inset 0 2px 0 0 #4a9eff}
 .item.drop-after{box-shadow:inset 0 -2px 0 0 #4a9eff}
@@ -761,6 +769,7 @@ const pinIcon=']] .. ICON.pin:gsub("'", "\\'") .. [[';
 const xIcon=']] .. ICON.xMark:gsub("'", "\\'") .. [[';
 const eyeIcon=']] .. ICON.eye:gsub("'", "\\'") .. [[';
 const boltIcon=']] .. ICON.bolt:gsub("'", "\\'") .. [[';
+const flipIcon=']] .. ICON.flip:gsub("'", "\\'") .. [[';
 
 function formatHotkey(hk){
   if(!hk||!hk.key) return '';
@@ -834,6 +843,23 @@ function hotkeyResult(success, message){
   }
 }
 
+// Only Hebrew text can be the wrong way round, so the button appears there and
+// nowhere else — an image or a line of English has nothing to flip.
+function hasHebrew(s){ return /[֐-׿]/.test(s||''); }
+function flipBtn(col,it,i){
+  if((it.type||'text')!=='text'||!hasHebrew(it.content)) return '';
+  return '<button class="flip-btn" onclick="event.stopPropagation();pasteFlipped(\''+col+'\','+i+')" title="הדבק בכיוון ההפוך">'+flipIcon+'</button>';
+}
+function pasteFlipped(col,idx){
+  selCol=col;selIdx=idx;hasInteracted=true;clampSel();renderSelection();
+  const arr=(col==='recent'?filtered(recent):filtered(pinned));
+  const it=arr[selIdx]; if(!it) return;
+  try{window.webkit.messageHandlers.clips.postMessage({
+    action:'select', type:'text', content:it.content||'',
+    title:it.title||'', imagePath:'', flip:true
+  });}catch(e){}
+}
+
 function render(){
   updatePickerUI();
   const r=filtered(recent), p=filtered(pinned);
@@ -847,7 +873,7 @@ function render(){
       inner+='<img src="'+(it.content||'')+'" class="item-img" loading="lazy">';
     }
     inner+='<div class="title">'+esc(it.title||it.content||'(empty)')+'</div>';
-    inner+='<div class="actions"><button class="eye-btn" onclick="event.stopPropagation();previewItem(\'recent\','+i+')" title="Preview">'+eyeIcon+'</button><button class="pin-btn" onclick="event.stopPropagation();quickPinRecent('+i+')">'+pinIcon+'</button></div>';
+    inner+='<div class="actions">'+flipBtn('recent',it,i)+'<button class="eye-btn" onclick="event.stopPropagation();previewItem(\'recent\','+i+')" title="Preview">'+eyeIcon+'</button><button class="pin-btn" onclick="event.stopPropagation();quickPinRecent('+i+')">'+pinIcon+'</button></div>';
     el.innerHTML=inner;
     el.onclick=()=>{selCol='recent';selIdx=i;hasInteracted=true;selectAndCommit('recent',i);};
     rList.appendChild(el);
@@ -863,7 +889,7 @@ function render(){
     if(it.hotkey){inner+='<span class="hotkey-badge">'+esc(formatHotkey(it.hotkey))+'<span class="hotkey-badge-x" onclick="event.stopPropagation();removeHotkeyForRow('+i+')" title="Remove hotkey">×</span></span>';}
     const hkTitle=it.hotkey?'Edit hotkey ('+esc(formatHotkey(it.hotkey))+')':'Assign hotkey';
     const hkClass='bolt-btn'+(it.hotkey?' has-hotkey':'');
-    inner+='<div class="actions"><button class="'+hkClass+'" onclick="event.stopPropagation();captureForRow('+i+')" title="'+hkTitle+'">'+boltIcon+'</button><button class="eye-btn" onclick="event.stopPropagation();previewItem(\'pinned\','+i+')" title="Preview">'+eyeIcon+'</button><button class="delete-btn" onclick="event.stopPropagation();deletePinned('+i+')">'+xIcon+'</button></div>';
+    inner+='<div class="actions">'+flipBtn('pinned',it,i)+'<button class="'+hkClass+'" onclick="event.stopPropagation();captureForRow('+i+')" title="'+hkTitle+'">'+boltIcon+'</button><button class="eye-btn" onclick="event.stopPropagation();previewItem(\'pinned\','+i+')" title="Preview">'+eyeIcon+'</button><button class="delete-btn" onclick="event.stopPropagation();deletePinned('+i+')">'+xIcon+'</button></div>';
     el.innerHTML=inner;
     el.onclick=()=>{
       if(suppressClick){suppressClick=false;return;}
@@ -1484,6 +1510,11 @@ local function handleWebMessage(msg)
     local contentType = body.type or "text"
     local content = body.content or ""
     local imgPath = body.imagePath or ""
+    -- The flip button pastes the other reading direction, for the rare line
+    -- the automatic pass judged wrong — or judged too little to act on.
+    if body.flip and contentType == "text" and content ~= "" then
+      content = bidiClip.unflip(content)
+    end
     if content ~= "" or imgPath ~= "" then
       -- Deduplicate: move selected item to the top of recent list
       pushRecent(contentType, content, imgPath ~= "" and imgPath or nil)
@@ -1909,6 +1940,15 @@ local function readAndStoreClipboard()
   else
     local text = hs.pasteboard.getContents()
     if text and type(text) == "string" and text ~= "" then
+      -- Hebrew copied out of a terminal arrives in visual order. Put it back
+      -- into reading order before anyone pastes it — and before it is stored,
+      -- so the history holds the corrected text too.
+      local fixed = bidiClip.fix(text, bidiClip.fromTerminal())
+      if fixed then
+        text = fixed
+        hs.pasteboard.setContents(fixed)
+        lastChangeCount = hs.pasteboard.changeCount()
+      end
       if text ~= lastClipboardContent or lastClipboardType ~= "text" then
         lastClipboardContent = text
         lastClipboardType = "text"
@@ -1923,15 +1963,17 @@ local function startWatcher()
 
   lastChangeCount = hs.pasteboard.changeCount()
 
-  -- Poll clipboard every 0.8 seconds, but only read when changeCount changes
-  watcher = hs.timer.doEvery(0.8, function()
+  -- Poll every 0.3s, but only read when changeCount changes — the check itself
+  -- is a single integer compare. Polling is what corrects Hebrew copied out of
+  -- a terminal, and at 0.8s you could copy and paste before it landed.
+  watcher = hs.timer.doEvery(0.3, function()
     local cc = hs.pasteboard.changeCount()
     if cc == lastChangeCount then return end
     lastChangeCount = cc
     readAndStoreClipboard()
   end)
 
-  print("[OK] Clipboard watcher started (polling every 0.8s)")
+  print("[OK] Clipboard watcher started (polling every 0.3s)")
 end
 
 ------------------------------------------------------------

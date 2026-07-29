@@ -197,7 +197,15 @@ local function restoreClipboard(snap)
   end
 end
 
+-- Claim the clipboard so the terminal-copy corrector leaves our own Cmd+C
+-- alone. Required lazily: it requires this module back, for the terminal list.
+local function holdClipboard(seconds)
+  local ok, bidi = pcall(require, "bidi_clipboard")
+  if ok and bidi and bidi.hold then bidi.hold(seconds) end
+end
+
 local function copySelection()
+  holdClipboard(6)
   local prev = snapshotClipboard()
   hs.pasteboard.setContents("")
   hs.eventtap.keyStroke({"cmd"}, "c", 0)
@@ -444,6 +452,7 @@ local function replaceInTerminalWalk(segments, fromEng, prevSnap)
     wlog("walk done; scheduling verify")
 
     hs.timer.doAfter(0.3, function()
+      holdClipboard(6)
       hs.pasteboard.setContents("")
       hs.eventtap.keyStroke({"cmd"}, "a", 0)
       hs.timer.usleep(80000)

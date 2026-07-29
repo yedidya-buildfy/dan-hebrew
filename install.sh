@@ -9,8 +9,8 @@ HS_DIR="$HOME/.hammerspoon"
 
 mkdir -p "$HS_DIR"
 
-# Symlink the three modules.
-for f in language_converter.lua clipboard_manager.lua hotkey_manager.lua; do
+# Symlink the modules.
+for f in language_converter.lua clipboard_manager.lua hotkey_manager.lua bidi_clipboard.lua; do
   ln -sf "$SRC_DIR/$f" "$HS_DIR/$f"
   echo "linked  $HS_DIR/$f  →  $SRC_DIR/$f"
 done
