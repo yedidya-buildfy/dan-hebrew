@@ -73,9 +73,55 @@ local function utf8Reverse(s)
   return table.concat(chars)
 end
 
+-- Runs that must come out of the conversion byte-for-byte identical: links,
+-- file paths, file mentions, emails, backtick code. They are never converted
+-- and never reversed, and they don't vote on the detected language.
+local PROTECTED_PATTERNS = {
+  "`[^`]+`",                                -- `code` (checked first: it wraps everything else)
+  "%a[%w+.%-]*://%S+",                      -- scheme://…
+  "%f[%w]www%.%S+",                         -- www.… (frontier so "awww." doesn't match)
+  "'[/~][^']*'",                            -- '/path with spaces'
+  '"[/~][^"]*"',                            -- "/path with spaces"
+  "%f[%S]~/%S*",                            -- ~/…
+  "%f[%S]/[%w%._%-]+/%S*",                  -- /a/b… (two slashes, so a bare "/" stays text)
+  "%f[%S][%w%._%%+%-]+@[%w%.%-]+%.%a%a+",   -- email (starts left of the @mention match, so it wins)
+  "%f[%S]@[%w%._%-/]+",                     -- @src/file.ts
+  -- ponytail: absolute paths only. Relative ones ("src/foo.ts") would also
+  -- swallow "24/7" and dates; add a pattern here if that turns out to matter.
+}
+
+-- Earliest match wins; on a tie the longer one does.
+local function findNextProtected(text, from)
+  -- The %f[%S] patterns need a whitespace boundary before the match, and the
+  -- start of a string doesn't count as one — a leading space supplies it.
+  local padded = " " .. text
+  local bestS, bestE = nil, nil
+  for _, pat in ipairs(PROTECTED_PATTERNS) do
+    local s, e = string.find(padded, pat, (from or 1) + 1)
+    if s and (not bestS or s < bestS or (s == bestS and e > bestE)) then
+      bestS, bestE = s, e
+    end
+  end
+  if not bestS then return nil end
+  return bestS - 1, bestE - 1
+end
+
+local function stripProtected(text)
+  local out, i = {}, 1
+  while true do
+    local s, e = findNextProtected(text, i)
+    if not s then
+      table.insert(out, text:sub(i))
+      return table.concat(out)
+    end
+    table.insert(out, text:sub(i, s - 1))
+    i = e + 1
+  end
+end
+
 local function detectEnglish(text)
-  -- URLs are never converted, so they shouldn't vote on the detected language.
-  text = text:gsub("%a[%w+.%-]*://%S+", ""):gsub("%f[%w]www%.%S+", "")
+  -- Protected runs are never converted, so they shouldn't vote on the direction.
+  text = stripProtected(text)
   local eng, heb = 0, 0
   for _, cp in utf8.codes(text) do
     if (cp >= 0x41 and cp <= 0x5A) or (cp >= 0x61 and cp <= 0x7A) then
@@ -86,20 +132,6 @@ local function detectEnglish(text)
   end
   if eng == 0 and heb == 0 then return nil end
   return eng >= heb
-end
-
--- URLs must never be converted: scheme://… , www.… (frontier so "awww." doesn't match).
-local URL_PATTERNS = {
-  "%a[%w+.%-]*://%S+",
-  "%f[%w]www%.%S+",
-}
-local function findNextUrl(text, from)
-  local bestS, bestE = nil, nil
-  for _, pat in ipairs(URL_PATTERNS) do
-    local s, e = string.find(text, pat, from)
-    if s and (not bestS or s < bestS) then bestS, bestE = s, e end
-  end
-  return bestS, bestE
 end
 
 local function convertChars(text, fromEng)
@@ -119,7 +151,7 @@ local function convertText(text, fromEng)
   local out = {}
   local i = 1
   while i <= #text do
-    local s, e = findNextUrl(text, i)
+    local s, e = findNextProtected(text, i)
     if not s then
       table.insert(out, convertChars(text:sub(i), fromEng))
       break
@@ -251,21 +283,26 @@ end
 local function parseSegments(text)
   local segments = {}
   local i = 1
+  local function push(kind, s)
+    if #s > 0 then
+      table.insert(segments, { kind = kind, s = s, len = utf8Len(s) })
+    end
+  end
   while i <= #text do
-    local s, e = findNextPlaceholder(text, i)
+    local ps, pe = findNextPlaceholder(text, i)
+    local ls, le = findNextProtected(text, i)
+    local kind, s, e
+    if ps and (not ls or ps <= ls) then
+      kind, s, e = "placeholder", ps, pe
+    elseif ls then
+      kind, s, e = "literal", ls, le
+    end
     if not s then
-      local rest = text:sub(i)
-      if #rest > 0 then
-        table.insert(segments, { kind = "text", s = rest, len = utf8Len(rest) })
-      end
+      push("text", text:sub(i))
       return segments
     end
-    if s > i then
-      local pre = text:sub(i, s - 1)
-      table.insert(segments, { kind = "text", s = pre, len = utf8Len(pre) })
-    end
-    local ph = text:sub(s, e)
-    table.insert(segments, { kind = "placeholder", s = ph, len = utf8Len(ph) })
+    if s > i then push("text", text:sub(i, s - 1)) end
+    push(kind, text:sub(s, e))
     i = e + 1
   end
   return segments
@@ -306,7 +343,8 @@ local function flipEdgeSpaces(s)
 end
 
 -- Convert segments from Cmd+C visual order into the logical/buffer order the
--- cursor actually moves through. Called only when the paragraph is RTL.
+-- cursor actually moves through, and back again — the flip is its own inverse.
+-- Called only when the paragraph is RTL.
 local function unbidiSegments(segments)
   local result = {}
   for i = #segments, 1, -1 do
@@ -314,6 +352,10 @@ local function unbidiSegments(segments)
     if seg.kind == "placeholder" then
       local body = seg.s:sub(2, -2)  -- strip mirrored brackets
       table.insert(result, { kind = "placeholder", s = "[" .. body .. "]", len = seg.len })
+    elseif seg.kind == "literal" then
+      -- Links/paths are LTR runs: bidi keeps their character order, only the
+      -- surrounding spaces move.
+      table.insert(result, { kind = "literal", s = flipEdgeSpaces(seg.s), len = seg.len })
     elseif hasHebrew(seg.s) then
       -- Hebrew run is reversed visually; full-reverse recovers logical order.
       table.insert(result, { kind = "text", s = utf8Reverse(seg.s), len = seg.len })
@@ -351,7 +393,8 @@ end
 
 -- Left-to-right walk that replaces text segments by forward-deleting them
 -- and typing the converted text at the same cursor position. Placeholders
--- are skipped with a single Right Arrow (atomic). Cursor only ever moves
+-- are skipped with a single Right Arrow (atomic); links and paths with one
+-- Right Arrow per character. Cursor only ever moves
 -- rightward across the input, so the placeholder boundary on the LEFT side
 -- of the cursor is never disturbed by destructive operations.
 local function replaceInTerminalWalk(segments, fromEng, prevSnap)
@@ -384,6 +427,14 @@ local function replaceInTerminalWalk(segments, fromEng, prevSnap)
         local conv = convertText(seg.s, fromEng)
         hs.eventtap.keyStrokes(conv)
         hs.timer.usleep(60000 + seg.len * 4000)
+      elseif seg.kind == "literal" then
+        -- Not atomic to the cursor like a placeholder is: one Right per char.
+        wlog(string.format("seg %d literal %q : %d rightArrow", idx, seg.s, seg.len))
+        for _ = 1, seg.len do
+          hs.eventtap.keyStroke({}, "right", 8000)
+          hs.timer.usleep(6000)
+        end
+        hs.timer.usleep(40000)
       else
         wlog(string.format("seg %d placeholder %q : single rightArrow", idx, seg.s))
         hs.eventtap.keyStroke({}, "right", 8000)
@@ -549,9 +600,17 @@ local function replaceInTerminal(target, converted, fromEng, prevSnap)
       end
     end
     -- Claude Code (and similar terminal TUIs) renders Hebrew left-to-right,
-    -- so the copied selection arrives in visual order. Reverse before typing
-    -- the English back so the result reads correctly.
-    local toType = (not fromEng) and utf8Reverse(converted) or converted
+    -- so the copied selection arrives in visual order. Flip back before typing
+    -- the English out — segment-aware, so an embedded link or path keeps its
+    -- own character order instead of being reversed with the sentence.
+    local toType = converted
+    if not fromEng then
+      local parts = {}
+      for _, seg in ipairs(unbidiSegments(parseSegments(sourceText))) do
+        table.insert(parts, seg.kind == "text" and convertText(seg.s, fromEng) or seg.s)
+      end
+      toType = table.concat(parts)
+    end
     hs.eventtap.keyStrokes(toType)
   end)
 end
@@ -590,8 +649,12 @@ function M.run()
   end
 end
 
--- Exports for sibling modules (wrong_layout_watcher).
+-- Exports for sibling modules (wrong_layout_watcher) and converter_test.lua.
 M.convertText        = convertText
+M.detectEnglish      = detectEnglish
+M.findNextProtected  = findNextProtected
+M.parseSegments      = parseSegments
+M.unbidiSegments     = unbidiSegments
 M.utf8Len            = utf8Len
 M.utf8Reverse        = utf8Reverse
 M.engToHeb           = engToHeb
