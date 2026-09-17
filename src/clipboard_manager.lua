@@ -2109,7 +2109,15 @@ local function addScreenshot(path, attempt)
   end
 
   pushRecent("image", generateThumbnail(img) or "", copyPath, path)
-  print("[OK] Screenshot added to clipboard history: " .. name)
+
+  -- Also on the clipboard, so Cmd+V right after the shot pastes it. Tell the
+  -- clipboard poll it has seen this image, or it would add it a second time.
+  hs.pasteboard.writeObjects(img)
+  local size = img:size()
+  lastClipboardContent = tostring(size.w) .. "x" .. tostring(size.h)
+  lastClipboardType = "image"
+  lastChangeCount = hs.pasteboard.changeCount()
+  print("[OK] Screenshot added to clipboard and history: " .. name)
 end
 
 local function startScreenshotWatcher()
