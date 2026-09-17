@@ -365,6 +365,11 @@ local function pushRecent(contentType, content, imagePath)
     return
   end
 
+  -- History is read from disk lazily. A copy made before the first panel open
+  -- used to land in an empty list, and the save that followed overwrote the
+  -- whole history file with just that one copy.
+  ensureFullyLoaded()
+
   local finalImagePath = imagePath
 
   -- For images: save full image to disk, keep only thumbnail in content
@@ -383,8 +388,7 @@ local function pushRecent(contentType, content, imagePath)
     end
   end
 
-  -- Skip expensive deduplication if not fully loaded (fast startup)
-  if fullyLoaded then
+  do
     -- Remove ALL existing occurrences of this content (deduplication)
     local i = 1
     while i <= #store.recent do
@@ -752,6 +756,7 @@ function setTypeFilter(name){
   typeFilter=name;
   selIdx=0;
   render();
+  document.getElementById('recentList').scrollTop=0;
 }
 function cyclePicker(d){
   const i=FILTER_ORDER.indexOf(typeFilter);
@@ -1152,6 +1157,7 @@ function pinFromDetail(){
   const arr=filtered(recent); const it=arr[selIdx];
   if(!it||selCol!=='recent') return;
   const title=(it.title||it.content||'').slice(0,60)||'(empty)';
+  closeDetail();
   try{window.webkit.messageHandlers.clips.postMessage({
     action:'addPinned', type:it.type||'text', content:it.content||'',
     title:title, imagePath:it.imagePath||''
@@ -1198,12 +1204,16 @@ function clearRecent(){
   try{window.webkit.messageHandlers.clips.postMessage({action:'clearRecent'});}catch(e){}
 }
 
-// Update data in-place (used by persistent webview)
+// Fresh open of the persistent webview: everything back to the newest copy.
 function updateData(newPinned, newRecent){
   pinned.length=0; pinned.push(...newPinned);
   recent.length=0; recent.push(...newRecent);
-  selIdx=0; selCol='recent'; filter=''; hasInteracted=false; detailMode=false;
+  selIdx=0; selCol='recent'; filter=''; hasInteracted=false; detailMode=false; editMode=false;
   captureMode=false; captureIndex=-1;
+  // A filter left on Images/Text would hide the newest copy, and a search box
+  // still focused from last time would swallow the arrow keys.
+  typeFilter='all';
+  if(document.activeElement&&document.activeElement.blur) document.activeElement.blur();
   document.getElementById('detailOverlay').classList.remove('active');
   document.getElementById('captureOverlay').classList.remove('active');
   const q=document.getElementById('q'); if(q) q.value='';
@@ -1211,6 +1221,16 @@ function updateData(newPinned, newRecent){
   // Fresh open: always start at the top so the newest copy is visible.
   document.getElementById('recentList').scrollTop=0;
   document.getElementById('pinnedList').scrollTop=0;
+}
+
+// Data changed while the panel is open (pin, delete, hotkey, clear): keep the
+// user where they were instead of throwing them back to the top.
+function refreshData(newPinned, newRecent){
+  pinned.length=0; pinned.push(...newPinned);
+  recent.length=0; recent.push(...newRecent);
+  if(selCol!=='picker') clampSel();
+  render();
+  if(selCol==='recent'||selCol==='pinned') ensureVisible();
 }
 
 document.addEventListener('keydown',e=>{
@@ -1289,10 +1309,28 @@ document.addEventListener('keydown',e=>{
     else if(selCol==='recent'&&selIdx===0){selCol='picker';hasInteracted=true;renderSelection();}
     else{move(-1);}
   }
-  else if(e.key==='ArrowLeft'||e.key==='ArrowRight'){
+  else if((e.key==='ArrowLeft'||e.key==='ArrowRight')&&!searchFocused){
     e.preventDefault();
     if(selCol==='picker'){cyclePicker(e.key==='ArrowLeft'?-1:1);}
-    else{switchCol();}
+    // Recent is the left column, Pinned the right: the arrow says where to go,
+    // it no longer just toggles.
+    else if(e.key==='ArrowLeft'&&selCol==='pinned'){switchCol();}
+    else if(e.key==='ArrowRight'&&selCol==='recent'){switchCol();}
+  }
+  else if(e.key==='Tab'){
+    // Tab cycles All → Images → Text (Shift+Tab backwards); the arrows already
+    // move between the columns. The filter only applies to Recent, so land there.
+    e.preventDefault();
+    hasInteracted=true;
+    if(selCol==='pinned') selCol='recent';
+    cyclePicker(e.shiftKey?-1:1);
+    document.getElementById('recentList').scrollTop=0;
+  }
+  else if((e.key==='Home'||e.key==='End')&&!searchFocused&&selCol!=='picker'){
+    e.preventDefault();
+    hasInteracted=true;
+    selIdx=e.key==='Home'?0:Number.MAX_SAFE_INTEGER;
+    clampSel();renderSelection();
   }
   else if(e.key===' '&&!searchFocused){
     e.preventDefault();
@@ -1328,7 +1366,14 @@ maxRecentInput.addEventListener('focus',()=>{try{window.webkit.messageHandlers.c
 maxRecentInput.addEventListener('blur',()=>{try{window.webkit.messageHandlers.clips.postMessage({action:'disableTextEntry'});}catch(e){}commitMaxRecent();});
 maxRecentInput.addEventListener('input',()=>{clearTimeout(maxRecentDebounce);maxRecentDebounce=setTimeout(commitMaxRecent,400);});
 maxRecentInput.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();commitMaxRecent();maxRecentInput.blur();}});
-searchInput.addEventListener('input',e=>{hasInteracted=true;filter=norm(e.target.value||'');selIdx=0;render();});
+searchInput.addEventListener('input',e=>{
+  hasInteracted=true;filter=norm(e.target.value||'');selIdx=0;
+  // Results belong in the lists, so the selection leaves the filter tabs.
+  if(selCol==='picker') selCol='recent';
+  render();
+  document.getElementById('recentList').scrollTop=0;
+  document.getElementById('pinnedList').scrollTop=0;
+});
 window.addEventListener('load',()=>{render();});
 </script></body></html>
 ]]
@@ -1646,7 +1691,7 @@ local function handleWebMessage(msg)
       if panel then
         local pinnedWeb = prepareItemsForWeb(store.pinned)
         local recentWeb = prepareItemsForWeb(store.recent)
-        local js = string.format("updateData(%s,%s);", hs.json.encode(pinnedWeb), hs.json.encode(recentWeb))
+        local js = string.format("refreshData(%s,%s);", hs.json.encode(pinnedWeb), hs.json.encode(recentWeb))
         panel:evaluateJavaScript(js)
       end
     end
@@ -1656,7 +1701,7 @@ local function handleWebMessage(msg)
       if panel then
         local pinnedWeb = prepareItemsForWeb(store.pinned)
         local recentWeb = prepareItemsForWeb(store.recent)
-        local js = string.format("updateData(%s,%s);", hs.json.encode(pinnedWeb), hs.json.encode(recentWeb))
+        local js = string.format("refreshData(%s,%s);", hs.json.encode(pinnedWeb), hs.json.encode(recentWeb))
         panel:evaluateJavaScript(js)
       end
     end
@@ -1686,7 +1731,7 @@ local function handleWebMessage(msg)
     if panel then
       local pinnedWeb = prepareItemsForWeb(store.pinned)
       local recentWeb = prepareItemsForWeb(store.recent)
-      local js = string.format("updateData(%s,%s);", hs.json.encode(pinnedWeb), hs.json.encode(recentWeb))
+      local js = string.format("refreshData(%s,%s);", hs.json.encode(pinnedWeb), hs.json.encode(recentWeb))
       panel:evaluateJavaScript(js)
     end
   elseif body.action == "assignHotkey" then
@@ -1757,7 +1802,7 @@ local function handleWebMessage(msg)
         if panel then
           local pinnedWeb = prepareItemsForWeb(store.pinned)
           local recentWeb = prepareItemsForWeb(store.recent)
-          local js = string.format("updateData(%s,%s);", hs.json.encode(pinnedWeb), hs.json.encode(recentWeb))
+          local js = string.format("refreshData(%s,%s);", hs.json.encode(pinnedWeb), hs.json.encode(recentWeb))
           panel:evaluateJavaScript(js)
         end
         hs.timer.doAfter(0, registerPinnedHotkeys)
@@ -1786,7 +1831,7 @@ local function handleWebMessage(msg)
           if panel then
             local pinnedWeb = prepareItemsForWeb(store.pinned)
             local recentWeb = prepareItemsForWeb(store.recent)
-            local js = string.format("updateData(%s,%s);", hs.json.encode(pinnedWeb), hs.json.encode(recentWeb))
+            local js = string.format("refreshData(%s,%s);", hs.json.encode(pinnedWeb), hs.json.encode(recentWeb))
             panel:evaluateJavaScript(js)
           end
         end
