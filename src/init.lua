@@ -5,6 +5,10 @@ local langConverter       = require("language_converter")
 
 local config = hotkeyManager.getConfig()
 
+-- Start with the Mac, so the shortcuts work without opening anything.
+-- Setting it when already on changes nothing.
+if not hs.autoLaunch() then hs.autoLaunch(true) end
+
 -- Cmd+Alt+K (default) — convert selected text between EN ⇄ HE.
 hs.hotkey.bind(config.convertLanguage.mods, config.convertLanguage.key, function()
   hotkeyManager.incrementUsage("convertLanguage")

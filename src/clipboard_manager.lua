@@ -357,7 +357,7 @@ local function titleForContent(contentType, content)
   end
 end
 
-local function pushRecent(contentType, content, imagePath)
+local function pushRecent(contentType, content, imagePath, sourcePath)
   contentType = contentType or "text"
   content = content or ""
 
@@ -409,6 +409,7 @@ local function pushRecent(contentType, content, imagePath)
         if existing.imagePath and not finalImagePath then
           finalImagePath = existing.imagePath
         end
+        sourcePath = sourcePath or existing.sourcePath
         table.remove(store.recent, i)
       else
         i = i + 1
@@ -426,6 +427,9 @@ local function pushRecent(contentType, content, imagePath)
   }
   if finalImagePath then
     entry.imagePath = finalImagePath
+  end
+  if sourcePath then
+    entry.sourcePath = sourcePath  -- the screenshot file it came from; stops re-adds
   end
   table.insert(store.recent, 1, entry)
 
@@ -2022,6 +2026,110 @@ local function startWatcher()
 end
 
 ------------------------------------------------------------
+-- Screenshots (Cmd+Shift+3/4/5) saved to a file join the history too
+------------------------------------------------------------
+local screenshotWatcher = nil
+local seenScreenshots = {}  -- this session; history entries cover past sessions
+local SCREENSHOT_MAX_AGE = 120  -- seconds; an old file touched later is not a new shot
+
+-- macOS shows a preview in the corner and only writes the file once it goes
+-- away (~5s). Turn it off so the shot is in the history straight away.
+-- Written only when not already off, so every reload is a no-op.
+local function hideScreenshotThumbnail()
+  local out = hs.execute("defaults read com.apple.screencapture show-thumbnail 2>/dev/null") or ""
+  if out:match("^%s*0%s*$") then return end
+  hs.execute("defaults write com.apple.screencapture show-thumbnail -bool false")
+  print("[OK] Screenshot corner preview turned off")
+end
+
+local function screenshotDir()
+  local out = hs.execute("defaults read com.apple.screencapture location 2>/dev/null") or ""
+  local dir = out:gsub("^%s+", ""):gsub("%s+$", "")
+  if dir == "" then dir = os.getenv("HOME") .. "/Desktop" end
+  dir = dir:gsub("^~", os.getenv("HOME"))
+  return dir
+end
+
+-- Only files macOS itself marks as a screen capture: a picture saved to the
+-- Desktop by anything else is not a screenshot.
+local function isScreenCapture(path)
+  local ok, val = pcall(function()
+    return hs.fs.xattr.get(path, "com.apple.metadata:kMDItemIsScreenCapture")
+  end)
+  if ok then return val ~= nil end
+  local _, status = hs.execute('xattr -p com.apple.metadata:kMDItemIsScreenCapture "' .. path:gsub('"', '\\"') .. '" >/dev/null 2>&1')
+  return status == true
+end
+
+local function alreadyInHistory(path)
+  if seenScreenshots[path] then return true end
+  for _, item in ipairs(store.recent) do
+    if item.sourcePath == path then return true end
+  end
+  return false
+end
+
+local function addScreenshot(path, attempt)
+  attempt = attempt or 1
+  local name = path:match("([^/]+)$") or ""
+  if name:sub(1, 1) == "." then return end  -- macOS's temp file before the rename
+  local ext = (name:match("%.([%w]+)$") or ""):lower()
+  if not ({ png = true, jpg = true, jpeg = true, heic = true, tiff = true, gif = true })[ext] then return end
+
+  local attrs = hs.fs.attributes(path)
+  if not attrs or attrs.mode ~= "file" then return end
+  if os.time() - (attrs.creation or attrs.modification or 0) > SCREENSHOT_MAX_AGE then return end
+  if not isScreenCapture(path) then return end
+
+  ensureFullyLoaded()
+  if alreadyInHistory(path) then return end
+
+  -- Claimed now, so a second event for the same file while this one waits
+  -- on a retry cannot add it again.
+  seenScreenshots[path] = true
+  local img = hs.image.imageFromPath(path)
+  if not img then
+    -- The file can still be mid-write when the event lands: try again shortly.
+    if attempt < 3 then
+      hs.timer.doAfter(0.5, function() seenScreenshots[path] = nil; addScreenshot(path, attempt + 1) end)
+    else
+      seenScreenshots[path] = nil
+    end
+    return
+  end
+
+  -- Keep our own copy: the history deletes its images when they age out, and
+  -- that must never be the user's screenshot file.
+  ensureImageDir()
+  local copyPath = imageDir .. "/shot_" .. tostring(os.time()) .. "_" .. tostring(math.random(10000, 99999)) .. ".png"
+  if not img:saveToFile(copyPath, "PNG") then
+    print("[ERR] Could not copy screenshot " .. path)
+    seenScreenshots[path] = nil
+    return
+  end
+
+  pushRecent("image", generateThumbnail(img) or "", copyPath, path)
+  print("[OK] Screenshot added to clipboard history: " .. name)
+end
+
+local function startScreenshotWatcher()
+  if screenshotWatcher then screenshotWatcher:stop() end
+  hideScreenshotThumbnail()
+  local dir = screenshotDir()
+  screenshotWatcher = hs.pathwatcher.new(dir, function(paths)
+    local unique = {}
+    for _, p in ipairs(paths) do
+      if not unique[p] then
+        unique[p] = true
+        addScreenshot(p)
+      end
+    end
+  end)
+  screenshotWatcher:start()
+  print("[OK] Watching for screenshots in " .. dir)
+end
+
+------------------------------------------------------------
 -- Paste by index: Ctrl+1-9 for direct paste from recent history
 ------------------------------------------------------------
 local function pasteByIndex(index)
@@ -2127,6 +2235,7 @@ function M.start(hotkeyManager)
   loadStore()
   registerPinnedHotkeys()
   startWatcher()
+  startScreenshotWatcher()
 
   local mods, key = {"alt"}, "Z"
   if hotkeyManager and hotkeyManager.getConfig then
