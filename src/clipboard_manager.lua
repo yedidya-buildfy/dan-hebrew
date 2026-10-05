@@ -15,21 +15,35 @@ local imageDir = storeDir .. "/clipboard-images"
 local settingsPath = storeDir .. "/clipboard-settings.json"
 local maxRecent = 100
 local MAX_RECENT_MIN, MAX_RECENT_MAX = 5, 1000
+-- Names of the tabs above the Pinned column, in order. nil until the first
+-- run sorts the existing pins into Emails / Links.
+local pinnedCategories = nil
+local lastHandyId = 0  -- newest Handy transcription already in the history
 
 local function loadSettings()
   local f = io.open(settingsPath, "r")
   if not f then return end
   local data = f:read("*a"); f:close()
   local ok, parsed = pcall(hs.json.decode, data)
-  if ok and type(parsed) == "table" and type(parsed.maxRecent) == "number" then
+  if not ok or type(parsed) ~= "table" then return end
+  if type(parsed.maxRecent) == "number" then
     local n = math.floor(parsed.maxRecent)
     if n >= MAX_RECENT_MIN and n <= MAX_RECENT_MAX then maxRecent = n end
   end
+  if type(parsed.pinnedCategories) == "table" then pinnedCategories = parsed.pinnedCategories end
+  if type(parsed.lastHandyId) == "number" then lastHandyId = parsed.lastHandyId end
 end
 
 local function saveSettings()
   local f = io.open(settingsPath, "w")
-  if f then f:write(hs.json.encode({ maxRecent = maxRecent }, true)); f:close() end
+  if f then
+    f:write(hs.json.encode({
+      maxRecent = maxRecent,
+      pinnedCategories = pinnedCategories or {},
+      lastHandyId = lastHandyId,
+    }, true))
+    f:close()
+  end
 end
 
 loadSettings()
@@ -297,6 +311,25 @@ local function cleanOrphanedImages()
   end
 end
 
+-- History older than this is dropped, whatever the count limit says.
+-- Pinned items never expire.
+local MAX_AGE_SECONDS = 3 * 24 * 3600
+
+local function dropExpired()
+  local cutoff = os.time() - MAX_AGE_SECONDS
+  local removed = false
+  for i = #store.recent, 1, -1 do
+    if (tonumber(store.recent[i].ts) or 0) < cutoff then
+      table.remove(store.recent, i)
+      removed = true
+    end
+  end
+  if removed then
+    saveRecent()
+    cleanOrphanedImages()  -- deletes their image files unless a pinned item uses one
+  end
+end
+
 -- Fast load: only load pinned items on startup
 local function loadStore()
   -- Check for migration first
@@ -357,7 +390,7 @@ local function titleForContent(contentType, content)
   end
 end
 
-local function pushRecent(contentType, content, imagePath, sourcePath)
+local function pushRecent(contentType, content, imagePath, sourcePath, opts)
   contentType = contentType or "text"
   content = content or ""
 
@@ -410,6 +443,10 @@ local function pushRecent(contentType, content, imagePath, sourcePath)
           finalImagePath = existing.imagePath
         end
         sourcePath = sourcePath or existing.sourcePath
+        -- Handy pastes through the clipboard, so its text is often caught
+        -- twice: keep the one entry, still marked as Handy.
+        opts = opts or {}
+        opts.source = opts.source or existing.source
         table.remove(store.recent, i)
       else
         i = i + 1
@@ -423,8 +460,11 @@ local function pushRecent(contentType, content, imagePath, sourcePath)
     type = contentType,
     content = content,
     title = title,
-    ts = hs.timer.secondsSinceEpoch()
+    ts = (opts and opts.ts) or hs.timer.secondsSinceEpoch()
   }
+  if opts and opts.source then
+    entry.source = opts.source
+  end
   if finalImagePath then
     entry.imagePath = finalImagePath
   end
@@ -445,13 +485,14 @@ local function pushRecent(contentType, content, imagePath, sourcePath)
   saveRecentDebounced()  -- Debounced save to reduce disk I/O
 end
 
-local function addPinned(title, contentType, content, imagePath)
+local function addPinned(title, contentType, content, imagePath, category)
   if not content or content == "" then return false end
   contentType = contentType or "text"
   local entry = {
     title = title or titleForContent(contentType, content),
     type = contentType,
-    content = content
+    content = content,
+    category = (category and category ~= "") and category or nil
   }
   if imagePath then
     entry.imagePath = imagePath
@@ -571,7 +612,9 @@ local function prepareItemsForWeb(items)
       content = item.content or "",
       title = item.title or "",
       ts = item.ts,
-      imagePath = item.imagePath or nil
+      imagePath = item.imagePath or nil,
+      category = item.category,
+      source = item.source
     }
     -- For images with disk storage, provide a file:// URL for the detail view
     if item.imagePath and fileExists(item.imagePath) then
@@ -612,6 +655,12 @@ html,body{margin:0;padding:0;font-family:-apple-system,Helvetica,Arial;backgroun
 .filter-tab:hover{background:#222;color:#ddd}
 .filter-tab.active{background:#1a2a3a;color:#4a9eff;border-color:#4a9eff}
 .filter-tab.focused{box-shadow:0 0 0 2px #4a9eff;outline:none}
+#pinTabs{overflow-x:auto;scrollbar-width:none}
+#pinTabs::-webkit-scrollbar{display:none}
+#pinTabs .filter-tab{flex:none}
+#pinTabs .filter-tab.drop-target{background:#1a3a2a;color:#4c8;border-color:#4c8}
+.filter-tab.add-tab{flex:none;padding:4px 9px}
+.src-badge{font-size:10px;color:#b98ae0;border:1px solid #4a3a5a;border-radius:4px;padding:1px 5px;flex-shrink:0}
 
 /* List items — always compact */
 .item{padding:7px 10px;border-bottom:1px solid #1a1a1a;cursor:pointer;display:flex;align-items:center;gap:8px;position:relative;transition:background .15s ease}
@@ -707,6 +756,7 @@ html,body{margin:0;padding:0;font-family:-apple-system,Helvetica,Arial;backgroun
       <button class="filter-tab active" data-tf="all" onclick="setTypeFilter('all')">All</button>
       <button class="filter-tab" data-tf="images" onclick="setTypeFilter('images')">Images</button>
       <button class="filter-tab" data-tf="text" onclick="setTypeFilter('text')">Text</button>
+      <button class="filter-tab" data-tf="handy" onclick="setTypeFilter('handy')">Handy</button>
     </div>
     <div class="list" id="recentList"></div>
   </div>
@@ -717,6 +767,7 @@ html,body{margin:0;padding:0;font-family:-apple-system,Helvetica,Arial;backgroun
         <button class="header-btn" onclick="addNewPinned()" title="Add new pinned item">]] .. ICON.plus .. [[</button>
       </div>
     </div>
+    <div class="filter-tabs" id="pinTabs" title="Drag a pinned item onto a tab to file it. Double-click a tab to rename, right-click to delete."></div>
     <div class="list" id="pinnedList"></div>
   </div>
 </div>
@@ -743,7 +794,11 @@ let pinned=]] .. pinnedJSON .. [[, recent=]] .. recentJSON .. [[;
 let selCol='recent', selIdx=0, filter='', hasInteracted=false, detailMode=false, editMode=false;
 let captureMode=false, captureIndex=-1;
 let typeFilter='all';
-const FILTER_ORDER=['all','images','text'];
+const FILTER_ORDER=['all','images','text','handy'];
+let categories=]] .. hs.json.encode(pinnedCategories or {}) .. [[;
+if(!Array.isArray(categories)) categories=[];  // an empty Lua table may encode as {}
+let pinCat='all';  // 'all', 'other' (no tab), or a category name
+let dropCat=null;  // tab under the cursor while dragging a pin
 let dragFromIdx=-1, dragHoverIdx=-1, dragHoverBefore=true;
 let dragStartX=0, dragStartY=0, dragActiveEl=null, dragPending=false, dragMoved=false, suppressClick=false;
 const norm=s=>(s||'').toLowerCase();
@@ -751,7 +806,12 @@ const esc=s=>{const d=document.createElement('div');d.textContent=s;return d.inn
 const filtered=arr=>{
   let out=!filter?arr:arr.filter(it=>norm(it.content||'').includes(filter)||norm(it.title||'').includes(filter));
   if(arr===recent && typeFilter!=='all'){
-    out=out.filter(it=>typeFilter==='images' ? it.type==='image' : it.type!=='image');
+    out=out.filter(it=>typeFilter==='images' ? it.type==='image'
+      : typeFilter==='handy' ? it.source==='handy'
+      : it.type!=='image' && it.source!=='handy');
+  }
+  if(arr===pinned && pinCat!=='all'){
+    out=out.filter(it=>pinCat==='other' ? !categories.includes(it.category) : it.category===pinCat);
   }
   return out;
 };
@@ -773,6 +833,65 @@ function updatePickerUI(){
     el.classList.toggle('focused', selCol==='picker' && el.dataset.tf===typeFilter);
   });
 }
+
+function renderPinTabs(){
+  const tabs=[ ['all','All'], ...categories.map(c=>[c,c]), ['other','Other'] ];  // spaced: a closing double bracket would end the Lua string
+  const box=document.getElementById('pinTabs');
+  box.innerHTML='';
+  tabs.forEach(([key,label])=>{
+    const b=document.createElement('button');
+    b.className='filter-tab'+(pinCat===key?' active':'');
+    b.dataset.cat=key;
+    b.textContent=label;
+    b.onclick=()=>{pinCat=key;if(selCol==='pinned')selIdx=0;render();};
+    if(categories.includes(key)){
+      b.ondblclick=()=>renameCategory(key);
+      b.oncontextmenu=ev=>{ev.preventDefault();deleteCategory(key);};
+    }
+    box.appendChild(b);
+  });
+  const add=document.createElement('button');
+  add.className='filter-tab add-tab'; add.textContent='+'; add.title='New category';
+  add.onclick=addCategory;
+  box.appendChild(add);
+}
+function askName(msg, def){
+  try{window.webkit.messageHandlers.clips.postMessage({action:'enableTextEntry'});}catch(e){}
+  const v=prompt(msg, def||'');
+  try{window.webkit.messageHandlers.clips.postMessage({action:'disableTextEntry'});}catch(e){}
+  const name=(v||'').trim();
+  if(!name||name==='All'||name==='Other'||categories.includes(name)) return null;
+  return name;
+}
+function postCategories(from,to){
+  try{window.webkit.messageHandlers.clips.postMessage({action:'setCategories',list:categories,from:from||'',to:to||''});}catch(e){}
+}
+function addCategory(){
+  const name=askName('New category name:'); if(!name) return;
+  categories.push(name); pinCat=name; postCategories(); render();
+}
+function renameCategory(old){
+  const name=askName('Rename category:', old); if(!name) return;
+  categories[categories.indexOf(old)]=name;
+  pinned.forEach(p=>{if(p.category===old)p.category=name;});
+  if(pinCat===old) pinCat=name;
+  postCategories(old,name); render();
+}
+function deleteCategory(cat){
+  if(!confirm('Delete category "'+cat+'"? Its items move to Other.')) return;
+  categories=categories.filter(c=>c!==cat);
+  pinned.forEach(p=>{if(p.category===cat)delete p.category;});
+  if(pinCat===cat) pinCat='all';
+  postCategories(cat,''); render();
+}
+function setPinCategory(actualIdx, cat){
+  const it=pinned[actualIdx]; if(!it) return;
+  if(cat==='other') delete it.category; else it.category=cat;
+  render();
+  try{window.webkit.messageHandlers.clips.postMessage({action:'setCategory',index:actualIdx,category:cat==='other'?'':cat});}catch(e){}
+}
+// A new pin lands in the category tab that is open.
+function currentCategory(){ return categories.includes(pinCat)?pinCat:''; }
 
 const pinIcon=']] .. ICON.pin:gsub("'", "\\'") .. [[';
 const xIcon=']] .. ICON.xMark:gsub("'", "\\'") .. [[';
@@ -871,6 +990,7 @@ function pasteFlipped(col,idx){
 
 function render(){
   updatePickerUI();
+  renderPinTabs();
   const r=filtered(recent), p=filtered(pinned);
   const rList=document.getElementById('recentList'), pList=document.getElementById('pinnedList');
   rList.innerHTML=''; pList.innerHTML='';
@@ -882,6 +1002,7 @@ function render(){
       inner+='<img src="'+(it.content||'')+'" class="item-img" loading="lazy">';
     }
     inner+='<div class="title">'+esc(it.title||it.content||'(empty)')+'</div>';
+    if(it.source==='handy') inner+='<span class="src-badge">Handy</span>';
     inner+='<div class="actions">'+flipBtn('recent',it,i)+'<button class="eye-btn" onclick="event.stopPropagation();previewItem(\'recent\','+i+')" title="Preview">'+eyeIcon+'</button><button class="pin-btn" onclick="event.stopPropagation();quickPinRecent('+i+')">'+pinIcon+'</button></div>';
     el.innerHTML=inner;
     el.onclick=()=>{selCol='recent';selIdx=i;hasInteracted=true;selectAndCommit('recent',i);};
@@ -904,14 +1025,17 @@ function render(){
       if(suppressClick){suppressClick=false;return;}
       selCol='pinned';selIdx=i;hasInteracted=true;selectAndCommit('pinned',i);
     };
-    // Drag-to-reorder (only when no search filter is active)
+    // Drag-to-reorder (only when no search filter is active), or onto a
+    // category tab. Indices are positions in the full pinned list, so a
+    // category view reorders correctly too.
     if(!filter){
+      const actualIdx=pinned.indexOf(it);
       el.classList.add('reorderable');
-      el.dataset.pidx=i;
+      el.dataset.pidx=actualIdx;
       el.addEventListener('mousedown',ev=>{
         if(ev.button!==0) return;
         if(ev.target.closest('button')) return;
-        dragFromIdx=i;
+        dragFromIdx=actualIdx;
         dragHoverIdx=-1;
         dragHoverBefore=true;
         dragStartX=ev.clientX;
@@ -926,6 +1050,8 @@ function render(){
 }
 function clearDropIndicators(){
   document.querySelectorAll('.item.drop-before,.item.drop-after').forEach(e=>e.classList.remove('drop-before','drop-after'));
+  document.querySelectorAll('#pinTabs .drop-target').forEach(e=>e.classList.remove('drop-target'));
+  dropCat=null;
 }
 function clearDragState(){
   if(dragActiveEl) dragActiveEl.classList.remove('dragging');
@@ -939,13 +1065,10 @@ function clearDragState(){
 }
 function reorderPinned(from,to){
   if(from===to||from<0||from>=pinned.length||to<0||to>=pinned.length) return;
+  const selItem=selCol==='pinned'?filtered(pinned)[selIdx]:null;
   const item=pinned.splice(from,1)[0];
   pinned.splice(to,0,item);
-  if(selCol==='pinned'){
-    if(selIdx===from) selIdx=to;
-    else if(from<selIdx&&to>=selIdx) selIdx-=1;
-    else if(from>selIdx&&to<=selIdx) selIdx+=1;
-  }
+  if(selItem) selIdx=Math.max(0,filtered(pinned).indexOf(selItem));
   render();
   try{window.webkit.messageHandlers.clips.postMessage({action:'reorderPinned',from:from,to:to});}catch(e){}
 }
@@ -957,8 +1080,15 @@ document.addEventListener('mousemove',ev=>{
     dragMoved=true;
     if(dragActiveEl) dragActiveEl.classList.add('dragging');
   }
-  const target=ev.target.closest ? ev.target.closest('#pinnedList .item') : null;
   clearDropIndicators();
+  const tab=ev.target.closest ? ev.target.closest('#pinTabs .filter-tab[data-cat]') : null;
+  if(tab && tab.dataset.cat!=='all'){
+    dropCat=tab.dataset.cat;
+    tab.classList.add('drop-target');
+    dragHoverIdx=-1;
+    return;
+  }
+  const target=ev.target.closest ? ev.target.closest('#pinnedList .item') : null;
   if(!target){
     dragHoverIdx=-1;
     return;
@@ -977,8 +1107,9 @@ document.addEventListener('mousemove',ev=>{
 document.addEventListener('mouseup',()=>{
   if(!dragPending){clearDragState();return;}
   const wasDragging=dragMoved;
-  const from=dragFromIdx, hoverIdx=dragHoverIdx, before=dragHoverBefore;
+  const from=dragFromIdx, hoverIdx=dragHoverIdx, before=dragHoverBefore, cat=dropCat;
   clearDragState();
+  if(wasDragging&&cat&&from>=0){suppressClick=true;setPinCategory(from,cat);return;}
   if(!wasDragging||hoverIdx<0||from<0||from===hoverIdx) return;
   let toIdx=before?hoverIdx:hoverIdx+1;
   if(from<toIdx) toIdx-=1;
@@ -1164,7 +1295,7 @@ function pinFromDetail(){
   closeDetail();
   try{window.webkit.messageHandlers.clips.postMessage({
     action:'addPinned', type:it.type||'text', content:it.content||'',
-    title:title, imagePath:it.imagePath||''
+    title:title, imagePath:it.imagePath||'', category:currentCategory()
   });}catch(e){}
 }
 
@@ -1176,7 +1307,7 @@ function pinSelected(){
   if(title===null) return;
   try{window.webkit.messageHandlers.clips.postMessage({
     action:'addPinned', type:it.type||'text', content:it.content||'',
-    title:title||'', imagePath:it.imagePath||''
+    title:title||'', imagePath:it.imagePath||'', category:currentCategory()
   });}catch(e){}
 }
 function addNewPinned(){
@@ -1186,14 +1317,14 @@ function addNewPinned(){
   const title=prompt('Name:', content.slice(0,60));
   try{window.webkit.messageHandlers.clips.postMessage({action:'disableTextEntry'});}catch(e){}
   if(title===null) return;
-  try{window.webkit.messageHandlers.clips.postMessage({action:'addPinned', type:'text', content:content, title:title||content.slice(0,60)});}catch(e){}
+  try{window.webkit.messageHandlers.clips.postMessage({action:'addPinned', type:'text', content:content, title:title||content.slice(0,60), category:currentCategory()});}catch(e){}
 }
 function quickPinRecent(idx){
   const arr=filtered(recent); const it=arr[idx]; if(!it) return;
   const title=(it.title||it.content||'').replace(/\s+/g,' ').slice(0,60)||'(empty)';
   try{window.webkit.messageHandlers.clips.postMessage({
     action:'addPinned', type:it.type||'text', content:it.content||'',
-    title:title, imagePath:it.imagePath||''
+    title:title, imagePath:it.imagePath||'', category:currentCategory()
   });}catch(e){}
 }
 function deletePinned(idx){
@@ -1214,9 +1345,9 @@ function updateData(newPinned, newRecent){
   recent.length=0; recent.push(...newRecent);
   selIdx=0; selCol='recent'; filter=''; hasInteracted=false; detailMode=false; editMode=false;
   captureMode=false; captureIndex=-1;
-  // A filter left on Images/Text would hide the newest copy, and a search box
-  // still focused from last time would swallow the arrow keys.
-  typeFilter='all';
+  // The tab you were on (Handy, Images, a pinned category) stays open next
+  // time. A search box still focused from last time would swallow the arrow
+  // keys, so that one is cleared.
   if(document.activeElement&&document.activeElement.blur) document.activeElement.blur();
   document.getElementById('detailOverlay').classList.remove('active');
   document.getElementById('captureOverlay').classList.remove('active');
@@ -1225,6 +1356,16 @@ function updateData(newPinned, newRecent){
   // Fresh open: always start at the top so the newest copy is visible.
   document.getElementById('recentList').scrollTop=0;
   document.getElementById('pinnedList').scrollTop=0;
+}
+
+// The rest of the history, sent right after the panel shows. Skipped if the
+// list was replaced in between (a pin, delete or edit sends the full list).
+function appendRecent(rest, headLen){
+  if(recent.length!==headLen) return;
+  recent.push(...rest);
+  const rList=document.getElementById('recentList'), st=rList.scrollTop;
+  render();
+  rList.scrollTop=st;
 }
 
 // Data changed while the panel is open (pin, delete, hotkey, clear): keep the
@@ -1691,7 +1832,7 @@ local function handleWebMessage(msg)
     local content = body.content or ""
     local title = body.title or titleForContent(contentType, content)
     local imgPath = body.imagePath or ""
-    if addPinned(title, contentType, content, imgPath ~= "" and imgPath or nil) then
+    if addPinned(title, contentType, content, imgPath ~= "" and imgPath or nil, body.category) then
       if panel then
         local pinnedWeb = prepareItemsForWeb(store.pinned)
         local recentWeb = prepareItemsForWeb(store.recent)
@@ -1708,6 +1849,27 @@ local function handleWebMessage(msg)
         local js = string.format("refreshData(%s,%s);", hs.json.encode(pinnedWeb), hs.json.encode(recentWeb))
         panel:evaluateJavaScript(js)
       end
+    end
+  elseif body.action == "setCategory" then
+    local item = store.pinned[(tonumber(body.index) or -1) + 1]
+    if item then
+      item.category = (body.category and body.category ~= "") and body.category or nil
+      savePinned()
+    end
+  elseif body.action == "setCategories" then
+    -- The tab list itself; a rename or delete also moves the pins along.
+    if type(body.list) == "table" then
+      pinnedCategories = {}
+      for _, c in ipairs(body.list) do table.insert(pinnedCategories, tostring(c)) end
+      saveSettings()
+    end
+    if body.from and body.from ~= "" then
+      for _, item in ipairs(store.pinned) do
+        if item.category == body.from then
+          item.category = (body.to and body.to ~= "") and body.to or nil
+        end
+      end
+      savePinned()
     end
   elseif body.action == "reorderPinned" then
     local from = body.from
@@ -1845,11 +2007,82 @@ local function handleWebMessage(msg)
 end
 
 ------------------------------------------------------------
+-- Pinned categories: first run sorts what is already pinned
+------------------------------------------------------------
+local function guessCategory(item)
+  if item.type ~= "text" then return nil end
+  local t = (item.content or ""):match("^%s*(.-)%s*$")
+  if t:match("^[%w%._%%%+%-]+@[%w%.%-]+%.%a+$") then return "Emails" end
+  if t:match("^https?://%S+$") or t:match("^www%.%S+$") then return "Links" end
+  return nil
+end
+
+local function seedCategories()
+  if pinnedCategories then return end
+  pinnedCategories = { "Emails", "Links" }
+  for _, item in ipairs(store.pinned) do
+    item.category = item.category or guessCategory(item)
+  end
+  savePinned()
+  saveSettings()
+end
+
+------------------------------------------------------------
+-- Handy (dictation app) transcriptions join the history
+------------------------------------------------------------
+-- Handy keeps only its last few transcriptions, so each new one is copied in
+-- as it lands and then lives here under the same 3-day / count limits.
+local handyDb = os.getenv("HOME") .. "/Library/Application Support/com.pais.handy/history.db"
+local handyWatcher, handyTimer = nil, nil
+
+local function importHandy()
+  if not fileExists(handyDb) then return end
+  local ok, err = pcall(function()
+    local db = hs.sqlite3.open(handyDb, hs.sqlite3.OPEN_READONLY)
+    if not db then return end
+    local rows = {}
+    local stmt = db:prepare([[SELECT id, timestamp, COALESCE(NULLIF(post_processed_text, ''), transcription_text) AS text
+      FROM transcription_history WHERE id > ? ORDER BY id]])
+    if stmt then
+      stmt:bind_values(lastHandyId)
+      for row in stmt:nrows() do table.insert(rows, row) end
+      stmt:finalize()
+    end
+    db:close()
+    local cutoff = os.time() - MAX_AGE_SECONDS
+    for _, row in ipairs(rows) do
+      local text = row.text and row.text:match("^%s*(.-)%s*$") or ""
+      if text ~= "" and (row.timestamp or 0) >= cutoff then
+        pushRecent("text", text, nil, nil, { source = "handy", ts = row.timestamp })
+      end
+      lastHandyId = math.max(lastHandyId, row.id)
+    end
+    if #rows > 0 then saveSettings() end
+  end)
+  if not ok then print("[clipboard] Handy import failed: " .. tostring(err)) end
+end
+
+local function startHandyWatcher()
+  local dir = handyDb:match("^(.*)/")
+  if not fileExists(dir) then return end
+  importHandy()
+  handyWatcher = hs.pathwatcher.new(dir, function()
+    -- Recordings land in the same folder; wait for the burst to settle.
+    if handyTimer then handyTimer:stop() end
+    handyTimer = hs.timer.doAfter(1, importHandy)
+  end):start()
+end
+
+------------------------------------------------------------
 -- Panel
 ------------------------------------------------------------
+local FIRST_ROWS = 40
+local openGen = 0
+
 local function openPanel()
   -- Load full clipboard history on first panel open (lazy loading)
   ensureFullyLoaded()
+  dropExpired()
 
   -- Save the window in focus before opening the panel
   previousWindow = hs.window.focusedWindow()
@@ -1879,10 +2112,22 @@ local function openPanel()
 
   if reusePanel then
     -- Reuse: update data, reposition, show
+    -- Only the top rows go in before the panel shows: preparing and drawing
+    -- all 500 (≈2.8MB with image thumbnails) took ~0.2s on every open. The
+    -- rest follows once the panel is on screen.
+    local head = { table.unpack(store.recent, 1, FIRST_ROWS) }
     local pinnedWeb = prepareItemsForWeb(store.pinned)
-    local recentWeb = prepareItemsForWeb(store.recent)
-    local js = string.format("updateData(%s,%s);", hs.json.encode(pinnedWeb), hs.json.encode(recentWeb))
+    local js = string.format("updateData(%s,%s);", hs.json.encode(pinnedWeb), hs.json.encode(prepareItemsForWeb(head)))
     panel:evaluateJavaScript(js)
+    openGen = openGen + 1
+    local gen = openGen
+    if #store.recent > FIRST_ROWS then
+      hs.timer.doAfter(0.05, function()
+        if not panel or gen ~= openGen then return end  -- closed or reopened meanwhile
+        local rest = { table.unpack(store.recent, FIRST_ROWS + 1) }
+        panel:evaluateJavaScript(string.format("appendRecent(%s,%d);", hs.json.encode(prepareItemsForWeb(rest)), #head))
+      end)
+    end
     panel:topLeft({ x = tl.x, y = tl.y })
     panel:size({ w = w, h = h })
     panel:show()
@@ -1897,6 +2142,14 @@ local function openPanel()
              :allowTextEntry(true)
              :allowNewWindows(false)
              :shadow(true)
+             -- Clicking another window takes focus away from the panel: close
+             -- it. The click watcher below does the same, but a reload of the
+             -- config has been seen to leave that watcher deaf (5.10.2026).
+             :windowCallback(function(action, _, hasFocus)
+               if action == "focusChange" and not hasFocus and panel and panel:isVisible() then
+                 closePanel()
+               end
+             end)
 
     panel:html(buildHTML())
     panel:topLeft({ x = tl.x, y = tl.y })
@@ -2015,12 +2268,16 @@ local function startWatcher()
   -- Poll every 0.3s, but only read when changeCount changes — the check itself
   -- is a single integer compare. Polling is what corrects Hebrew copied out of
   -- a terminal, and at 0.8s you could copy and paste before it landed.
-  watcher = hs.timer.doEvery(0.3, function()
+  -- continueOnError: a plain doEvery timer stops for good after one error in
+  -- its callback. On 30.9.2026 a single failed read (disk was full) silently
+  -- ended history capture until Hammerspoon was reloaded.
+  watcher = hs.timer.new(0.3, function()
     local cc = hs.pasteboard.changeCount()
     if cc == lastChangeCount then return end
     lastChangeCount = cc
-    readAndStoreClipboard()
-  end)
+    local ok, err = pcall(readAndStoreClipboard)
+    if not ok then print("[clipboard] capture failed: " .. tostring(err)) end
+  end, true):start()
 
   print("[OK] Clipboard watcher started (polling every 0.3s)")
 end
@@ -2241,9 +2498,11 @@ end
 function M.start(hotkeyManager)
   hotkeyManagerRef = hotkeyManager
   loadStore()
+  seedCategories()
   registerPinnedHotkeys()
   startWatcher()
   startScreenshotWatcher()
+  startHandyWatcher()
 
   local mods, key = {"alt"}, "Z"
   if hotkeyManager and hotkeyManager.getConfig then
