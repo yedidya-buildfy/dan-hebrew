@@ -12,6 +12,7 @@ local defaultConfig = {
   convertLanguageAll = { mods = {"cmd","alt"}, key = "Z" },
   clipboardManager   = { mods = {"alt"},       key = "Z" },
   openManager        = { mods = {"cmd","alt"}, key = "H" },
+  pasteLastHandy     = { mods = {"alt"},       key = "E" },
 }
 
 local function loadConfig()
@@ -51,7 +52,7 @@ local function loadUsageStats()
     local ok, parsed = pcall(hs.json.decode, data)
     if ok and type(parsed) == "table" then return parsed end
   end
-  return { convertLanguage = 0, convertLanguageAll = 0, clipboardManager = 0, openManager = 0 }
+  return { convertLanguage = 0, convertLanguageAll = 0, clipboardManager = 0, openManager = 0, pasteLastHandy = 0 }
 end
 
 local function saveUsageStats(stats)
@@ -66,7 +67,7 @@ function M.incrementUsage(name)
 end
 
 function M.getUsageStats()    return loadUsageStats() end
-function M.resetUsageStats()  saveUsageStats({ convertLanguage = 0, convertLanguageAll = 0, clipboardManager = 0, openManager = 0 }) end
+function M.resetUsageStats()  saveUsageStats({ convertLanguage = 0, convertLanguageAll = 0, clipboardManager = 0, openManager = 0, pasteLastHandy = 0 }) end
 function M.getConfig()        return loadConfig() end
 
 local function buildManagerHTML(config, usage)
@@ -117,6 +118,7 @@ const FEATURES = [
   { key:'convertLanguageAll', title:'בחר הכל + המרת שפה:',         defKey:'Z' },
   { key:'clipboardManager',   title:'מנהל Clipboard:',             defKey:'V' },
   { key:'openManager',        title:'ניהול קיצורים (חלון זה):',    defKey:'H' },
+  { key:'pasteLastHandy',     title:'הדבקת ההכתבה האחרונה (Handy):', defKey:'E' },
 ];
 const MODS = [['cmd','⌘ Cmd'],['alt','⌥ Opt'],['ctrl','⌃ Ctrl'],['shift','⇧ Shift']];
 

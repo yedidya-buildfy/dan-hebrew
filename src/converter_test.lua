@@ -93,5 +93,16 @@ do
   eq(twice, line, "flip is its own inverse")
 end
 
+do
+  local only = lang.isOnlyProtected
+  eq(only("https://example.com/a?b=1"), true, "bare link is only a link")
+  eq(only("  /Users/a/b.md \n ~/x/y.txt "), true, "paths on separate lines")
+  eq(only("hello@example.com"), true, "email")
+  eq(only("תסתכל על https://example.com"), false, "sentence with a link is not a link")
+  eq(only("hello world"), false, "plain text")
+  eq(only(""), false, "empty")
+  eq(only("'/Users/a b/c.md'"), true, "quoted path with spaces")
+end
+
 print(string.format("converter_test: %d checks, %d failures", checks, failures))
 return failures == 0

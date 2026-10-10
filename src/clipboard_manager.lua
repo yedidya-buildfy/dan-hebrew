@@ -58,6 +58,11 @@ local lastClipboardType = nil
 local lastChangeCount = 0
 local panelUCC = nil        -- persistent usercontent controller
 local previousWindow = nil  -- window that had focus before panel opened
+-- True from the moment an item is picked until its paste has gone out. Giving
+-- focus back to the previous window makes the panel lose focus, and the focus
+-- loss handler would close it (and bring the dock icon back, which takes focus
+-- for Hammerspoon) before Cmd+V is sent, so the paste landed nowhere.
+local committing = false
 local hotkeyManagerRef = nil  -- reference to hotkey_manager for config lookup
 
 ------------------------------------------------------------
@@ -604,6 +609,17 @@ local ICON = {
 ------------------------------------------------------------
 
 -- Prepare data for the webview (strip imagePath for security, add fileUrl for images)
+-- Same detection the language converter uses to leave links, paths, mentions
+-- and emails alone, so the Links tab and the converter never disagree. Only an
+-- item that is nothing but such runs counts; a sentence containing a link
+-- stays in All / Text.
+local function isLinkItem(item)
+  if item.type == "image" then return false end
+  local ok, lang = pcall(require, "language_converter")
+  if not ok or not lang.isOnlyProtected then return false end
+  return lang.isOnlyProtected(item.content)
+end
+
 local function prepareItemsForWeb(items)
   local webItems = {}
   for _, item in ipairs(items) do
@@ -614,7 +630,8 @@ local function prepareItemsForWeb(items)
       ts = item.ts,
       imagePath = item.imagePath or nil,
       category = item.category,
-      source = item.source
+      source = item.source,
+      isLink = isLinkItem(item) or nil
     }
     -- For images with disk storage, provide a file:// URL for the detail view
     if item.imagePath and fileExists(item.imagePath) then
@@ -756,6 +773,7 @@ html,body{margin:0;padding:0;font-family:-apple-system,Helvetica,Arial;backgroun
       <button class="filter-tab active" data-tf="all" onclick="setTypeFilter('all')">All</button>
       <button class="filter-tab" data-tf="images" onclick="setTypeFilter('images')">Images</button>
       <button class="filter-tab" data-tf="text" onclick="setTypeFilter('text')">Text</button>
+      <button class="filter-tab" data-tf="links" onclick="setTypeFilter('links')">Links</button>
       <button class="filter-tab" data-tf="handy" onclick="setTypeFilter('handy')">Handy</button>
     </div>
     <div class="list" id="recentList"></div>
@@ -794,7 +812,7 @@ let pinned=]] .. pinnedJSON .. [[, recent=]] .. recentJSON .. [[;
 let selCol='recent', selIdx=0, filter='', hasInteracted=false, detailMode=false, editMode=false;
 let captureMode=false, captureIndex=-1;
 let typeFilter='all';
-const FILTER_ORDER=['all','images','text','handy'];
+const FILTER_ORDER=['all','images','text','links','handy'];
 let categories=]] .. hs.json.encode(pinnedCategories or {}) .. [[;
 if(!Array.isArray(categories)) categories=[];  // an empty Lua table may encode as {}
 let pinCat='all';  // 'all', 'other' (no tab), or a category name
@@ -808,6 +826,7 @@ const filtered=arr=>{
   if(arr===recent && typeFilter!=='all'){
     out=out.filter(it=>typeFilter==='images' ? it.type==='image'
       : typeFilter==='handy' ? it.source==='handy'
+      : typeFilter==='links' ? !!it.isLink
       : it.type!=='image' && it.source!=='handy');
   }
   if(arr===pinned && pinCat!=='all'){
@@ -1706,6 +1725,7 @@ local function handleWebMessage(msg)
       content = bidiClip.unflip(content)
     end
     if content ~= "" or imgPath ~= "" then
+      committing = true
       -- Deduplicate: move selected item to the top of recent list
       pushRecent(contentType, content, imgPath ~= "" and imgPath or nil)
 
@@ -1740,6 +1760,7 @@ local function handleWebMessage(msg)
         end
         -- Close panel after paste completes
         hs.timer.doAfter(0.2, function()
+          committing = false
           closePanel()
         end)
       end)
@@ -2084,6 +2105,7 @@ local function openPanel()
   ensureFullyLoaded()
   dropExpired()
 
+  committing = false
   -- Save the window in focus before opening the panel
   previousWindow = hs.window.focusedWindow()
 
@@ -2146,7 +2168,7 @@ local function openPanel()
              -- it. The click watcher below does the same, but a reload of the
              -- config has been seen to leave that watcher deaf (5.10.2026).
              :windowCallback(function(action, _, hasFocus)
-               if action == "focusChange" and not hasFocus and panel and panel:isVisible() then
+               if action == "focusChange" and not hasFocus and not committing and panel and panel:isVisible() then
                  closePanel()
                end
              end)
@@ -2452,6 +2474,26 @@ local function pasteByIndex(index)
 end
 
 ------------------------------------------------------------
+-- Paste the newest Handy dictation without opening the panel
+------------------------------------------------------------
+local function pasteLastHandy()
+  ensureFullyLoaded()
+  for i, item in ipairs(store.recent) do
+    if item.source == "handy" then
+      -- The shortcut is still held down. Wait for the modifier to come up, or
+      -- the Cmd+V that follows reaches the app as Cmd+Alt+V.
+      local deadline = hs.timer.secondsSinceEpoch() + 1
+      hs.timer.waitUntil(function()
+        return not hs.eventtap.checkKeyboardModifiers().alt
+          or hs.timer.secondsSinceEpoch() > deadline
+      end, function() pasteByIndex(i) end, 0.02)
+      return
+    end
+  end
+  hs.alert.show("No Handy dictation in the history yet")
+end
+
+------------------------------------------------------------
 -- Extra hotkey: pin current clipboard (alt+shift+Z)
 ------------------------------------------------------------
 local function addPinnedFromClipboard()
@@ -2521,6 +2563,20 @@ function M.start(hotkeyManager)
   local addMods = { "shift" }
   for _, m in ipairs(mods) do if m ~= "shift" then table.insert(addMods, m) end end
   hs.hotkey.bind(addMods, key, addPinnedFromClipboard)
+
+  -- Paste the latest Handy dictation (alt+E by default, editable in Cmd+Alt+H)
+  local hMods, hKey = {"alt"}, "E"
+  if hotkeyManager and hotkeyManager.getConfig then
+    local ok, cfg = pcall(hotkeyManager.getConfig)
+    if ok and cfg and cfg.pasteLastHandy then
+      hMods = cfg.pasteLastHandy.mods or hMods
+      hKey  = cfg.pasteLastHandy.key  or hKey
+    end
+  end
+  hs.hotkey.bind(hMods, hKey, function()
+    if hotkeyManager then hotkeyManager.incrementUsage('pasteLastHandy') end
+    pasteLastHandy()
+  end)
 
   -- Bind Ctrl+1 through Ctrl+9 for direct paste
   for i = 1, 9 do

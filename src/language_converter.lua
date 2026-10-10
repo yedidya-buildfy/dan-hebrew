@@ -106,6 +106,25 @@ local function findNextProtected(text, from)
   return bestS - 1, bestE - 1
 end
 
+-- True when the whole text is nothing but protected runs (links, paths,
+-- mentions, emails, code) — one of them, or several separated by whitespace.
+-- A sentence that merely contains a link is not "only a link".
+local MAX_ONLY_PROTECTED = 4000  -- bytes; longer text is a document, not a link
+local function isOnlyProtected(text)
+  if type(text) ~= "string" then return false end
+  local t = text:match("^%s*(.-)%s*$")
+  if t == "" or #t > MAX_ONLY_PROTECTED then return false end
+  local function whole(str)
+    local s, e = findNextProtected(str, 1)
+    return s == 1 and e == #str
+  end
+  if whole(t) then return true end
+  for token in t:gmatch("%S+") do
+    if not whole(token) then return false end
+  end
+  return true
+end
+
 local function stripProtected(text)
   local out, i = {}, 1
   while true do
@@ -662,6 +681,7 @@ end
 M.convertText        = convertText
 M.detectEnglish      = detectEnglish
 M.findNextProtected  = findNextProtected
+M.isOnlyProtected    = isOnlyProtected
 M.parseSegments      = parseSegments
 M.unbidiSegments     = unbidiSegments
 M.utf8Len            = utf8Len
