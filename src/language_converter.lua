@@ -660,6 +660,14 @@ function M.run()
     return
   end
 
+  -- In a terminal Cmd+A copies the whole scrollback (up to 50k lines). The
+  -- prompt path narrows it to the input box and detects/converts only that,
+  -- so don't scan megabytes here that it throws away.
+  if isTerminalContext() and string.find(selected, PROMPT_GLYPH, 1, true) then
+    replaceInTerminal(selected, nil, nil, prevSnap)
+    return
+  end
+
   local fromEng = detectEnglish(selected)
   if fromEng == nil then
     restoreClipboard(prevSnap)

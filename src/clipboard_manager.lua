@@ -2297,6 +2297,9 @@ local function startWatcher()
     local cc = hs.pasteboard.changeCount()
     if cc == lastChangeCount then return end
     lastChangeCount = cc
+    -- The language converter's own Cmd+A/Cmd+C (a whole terminal scrollback)
+    -- is not a user copy; keep it out of the history.
+    if bidiClip.isHeld() then return end
     local ok, err = pcall(readAndStoreClipboard)
     if not ok then print("[clipboard] capture failed: " .. tostring(err)) end
   end, true):start()
